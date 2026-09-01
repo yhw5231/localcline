@@ -6,3 +6,8 @@
 # 本地环境配置（含密钥）
 .env
 .dev.vars
+
+# 用量数据库（SQLite，容器需挂载 data 目录持久化）
+/data/
+*.db
+*.db.tmp

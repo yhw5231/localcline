@@ -17,9 +17,18 @@ import (
 
 func callProxy(t *testing.T, method, path string, body []byte, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
+	reloadConfig() // 让 t.Setenv 生效
 	req := httptest.NewRequest(method, path, bytes.NewReader(body))
 	for k, v := range headers {
 		req.Header.Set(k, v)
+	}
+	// 默认注入有效登录 token（LOGIN_REQUIRED 默认 true）
+	if req.Header.Get("Authorization") == "" {
+		token, err := issueToken("admin")
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	rr := httptest.NewRecorder()
 	handler(rr, req)
@@ -243,6 +252,7 @@ func TestProxyChatNonStream(t *testing.T) {
 
 	t.Setenv("UPSTREAM_URL", upstream.URL)
 	t.Setenv("CLINE_API_KEY", "")
+	t.Setenv("LOGIN_REQUIRED", "false")
 	rr := callProxy(t, http.MethodPost, "/v1/chat/completions",
 		[]byte(`{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":false}`), nil)
 
@@ -268,6 +278,7 @@ func TestProxyChatStreaming(t *testing.T) {
 
 	t.Setenv("UPSTREAM_URL", upstream.URL)
 	t.Setenv("CLINE_API_KEY", "")
+	t.Setenv("LOGIN_REQUIRED", "false")
 	rr := callProxy(t, http.MethodPost, "/v1/chat/completions",
 		[]byte(`{"model":"x","stream":true}`), nil)
 
@@ -301,6 +312,7 @@ func TestProxyChatAuth(t *testing.T) {
 	t.Run("env key 优先于请求头", func(t *testing.T) {
 		t.Setenv("UPSTREAM_URL", upstream.URL)
 		t.Setenv("CLINE_API_KEY", "sk-env")
+		t.Setenv("LOGIN_REQUIRED", "false")
 		callProxy(t, http.MethodPost, "/v1/chat/completions",
 			[]byte(`{"stream":false}`), map[string]string{"Authorization": "Bearer sk-client"})
 		if gotAuth != "Bearer sk-env" {
@@ -311,6 +323,7 @@ func TestProxyChatAuth(t *testing.T) {
 	t.Run("无 env 时透传且不重复加前缀", func(t *testing.T) {
 		t.Setenv("UPSTREAM_URL", upstream.URL)
 		t.Setenv("CLINE_API_KEY", "")
+		t.Setenv("LOGIN_REQUIRED", "false")
 		callProxy(t, http.MethodPost, "/v1/chat/completions",
 			[]byte(`{"stream":false}`), map[string]string{"Authorization": "Bearer sk-client"})
 		if gotAuth != "Bearer sk-client" {
@@ -321,6 +334,7 @@ func TestProxyChatAuth(t *testing.T) {
 	t.Run("无 env 无前缀时自动加 Bearer", func(t *testing.T) {
 		t.Setenv("UPSTREAM_URL", upstream.URL)
 		t.Setenv("CLINE_API_KEY", "")
+		t.Setenv("LOGIN_REQUIRED", "false")
 		callProxy(t, http.MethodPost, "/v1/chat/completions",
 			[]byte(`{"stream":false}`), map[string]string{"Authorization": "sk-raw"})
 		if gotAuth != "Bearer sk-raw" {
@@ -332,6 +346,7 @@ func TestProxyChatAuth(t *testing.T) {
 func TestProxyChatUpstreamError(t *testing.T) {
 	t.Setenv("CLINE_API_KEY", "")
 	t.Setenv("UPSTREAM_URL", "http://127.0.0.1:1") // 不可达 → 连接拒绝
+	t.Setenv("LOGIN_REQUIRED", "false")
 	rr := callProxy(t, http.MethodPost, "/v1/chat/completions", []byte(`{"stream":false}`), nil)
 
 	if rr.Code != http.StatusBadGateway {
@@ -612,6 +627,7 @@ func TestProxyChatNonStreamNonJSONContentType(t *testing.T) {
 	defer upstream.Close()
 	t.Setenv("UPSTREAM_URL", upstream.URL)
 	t.Setenv("CLINE_API_KEY", "")
+	t.Setenv("LOGIN_REQUIRED", "false")
 
 	rr := callProxy(t, http.MethodPost, "/v1/chat/completions",
 		[]byte(`{"stream":false}`), nil)
@@ -634,6 +650,7 @@ func TestProxyChatStreamingNoBodyPassthrough(t *testing.T) {
 	defer upstream.Close()
 	t.Setenv("UPSTREAM_URL", upstream.URL)
 	t.Setenv("CLINE_API_KEY", "")
+	t.Setenv("LOGIN_REQUIRED", "false")
 
 	rr := callProxy(t, http.MethodPost, "/v1/chat/completions",
 		[]byte(`{"stream":true}`), nil)

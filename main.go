@@ -27,8 +27,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -82,24 +85,142 @@ type modelsEntryRec struct {
 }
 
 func main() {
-	addr := ":" + getenv("PORT", defaultPort)
+	reloadConfig()
+
+	// 用量数据库所在目录（容器需挂载该目录以持久化）
+	if dir := filepath.Dir(cfg.UsageDBPath); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			log.Printf("warning: cannot create usage db dir %s: %v", dir, err)
+		}
+	}
+	log.Printf("usage db path: %s (retention %dd, max %d records)", cfg.UsageDBPath, cfg.UsageRetentionDays, cfg.UsageMaxRecords)
+
+	// API 服务器
 	srv := &http.Server{
-		Addr:              addr,
-		Handler:           http.HandlerFunc(handler),
+		Addr:              ":" + cfg.Port,
+		Handler:           http.HandlerFunc(statsHandler),
 		ReadHeaderTimeout: 30 * time.Second,
 	}
-	log.Printf("cline2api (go) listening on %s", addr)
-	log.Fatal(srv.ListenAndServe())
+	log.Printf("cline2api (go) listening on :%s", cfg.Port)
+	go func() {
+		log.Fatal(srv.ListenAndServe())
+	}()
+
+	// 普通代理（HTTP / SOCKS5）
+	startNormalProxies()
+
+	// 代理池
+	startProxyPool()
+
+	select {} // 永久阻塞
 }
 
-func getenv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+// startNormalProxies 启动普通代理监听器（HTTP 正向代理 + SOCKS5）。
+func startNormalProxies() {
+	upstreamBase := extractSchemeHost(cfg.UpstreamURL)
+	managedHost := hostOnly(cfg.UpstreamURL)
+
+	if cfg.ProxyPort != "" {
+		var creds func(u, p string) bool
+		if cfg.ProxyUser != "" || cfg.ProxyPass != "" {
+			user, pass := cfg.ProxyUser, cfg.ProxyPass
+			creds = func(u, p string) bool { return u == user && p == pass }
+		}
+		ph := newProxyHandler(upstreamBase, managedHost, cfg.ProxyManagedAll, creds, nil)
+		addr := ":" + cfg.ProxyPort
+		log.Printf("http forward proxy listening on %s", addr)
+		go func() {
+			log.Fatal(http.ListenAndServe(addr, ph))
+		}()
 	}
-	return def
+
+	if cfg.SocksPort != "" {
+		var creds func(u, p string) bool
+		if cfg.SocksUser != "" || cfg.SocksPass != "" {
+			user, pass := cfg.SocksUser, cfg.SocksPass
+			creds = func(u, p string) bool { return u == user && p == pass }
+		}
+		ss := newSOCKSServer(creds, nil)
+		addr := ":" + cfg.SocksPort
+		log.Printf("socks5 proxy listening on %s", addr)
+		go func() {
+			ln, err := net.Listen("tcp", addr)
+			if err != nil {
+				log.Fatalf("socks5 listen %s: %v", addr, err)
+			}
+			log.Fatal(ss.Serve(ln))
+		}()
+	}
+}
+
+// startProxyPool 启动代理池监听器。
+func startProxyPool() {
+	if len(cfg.PoolEntries) == 0 {
+		return
+	}
+	pp := newProxyPool(cfg)
+	listeners, err := pp.StartListeners()
+	if err != nil {
+		log.Printf("proxy pool failed to start: %v", err)
+		return
+	}
+	for _, ln := range listeners {
+		log.Printf("proxy pool listener on %s", ln.Addr())
+	}
+}
+
+// hostOnly 提取 URL 的 host（不含端口）。
+func hostOnly(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
+	// 登录端点（无需鉴权）
+	if r.URL.Path == "/login" {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_, _ = w.Write([]byte("Method Not Allowed"))
+			return
+		}
+		handleLogin(w, r)
+		return
+	}
+
+	// 鉴权
+	user, ok := requireAuth(w, r)
+	if !ok {
+		return
+	}
+	if rs := reqStatsFrom(r.Context()); rs != nil {
+		rs.user = user
+	}
+
+	// admin 端点（仅管理员可见）
+	if r.URL.Path == "/admin/stats" || r.URL.Path == "/admin/requests" || r.URL.Path == "/admin/usage" {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_, _ = w.Write([]byte("Method Not Allowed"))
+			return
+		}
+		if !isAdmin(user) {
+			writeJSONError(w, http.StatusForbidden, "admin access required", "forbidden")
+			return
+		}
+		switch r.URL.Path {
+		case "/admin/stats":
+			handleAdminStats(w)
+		case "/admin/requests":
+			handleAdminRequests(w, r)
+		case "/admin/usage":
+			handleAdminUsage(w, r)
+		}
+		return
+	}
+
 	// 模型列表：GET /v1/models（兼容 OpenAI 客户端），只返回免费模型
 	if r.Method == http.MethodGet {
 		switch r.URL.Path {
@@ -118,6 +239,19 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	proxyChat(w, r)
 }
 
+// effectiveKeys 返回实际参与选择的上游 key 集合：
+// UPSTREAM_KEYS 优先；否则回退到 CLINE_API_KEY 单 key。
+func effectiveKeys() []string {
+	if len(cfg.UpstreamKeys) > 0 {
+		return cfg.UpstreamKeys
+	}
+	if key := getenv("CLINE_API_KEY", ""); key != "" {
+		return []string{key}
+	}
+	return nil
+}
+
+// proxyChat 转发聊天请求到上游：多 key 选择 + 每 (key, model) 冷却 + 改写。
 func proxyChat(w http.ResponseWriter, r *http.Request) {
 	// 读取请求体（顺带判断是否流式）
 	rawBody, err := io.ReadAll(r.Body)
@@ -126,87 +260,52 @@ func proxyChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stream := isStreamRequest(rawBody)
+	model := extractModel(rawBody)
+	upstream := cfg.UpstreamURL
 
-	upstream := getenv("UPSTREAM_URL", defaultUpstream)
-
-	// 鉴权：优先用环境变量里的 Cline key；否则透传请求自带的 Authorization
-	auth := getenv("CLINE_API_KEY", "")
-	if auth == "" {
-		auth = r.Header.Get("Authorization")
-	}
-	if auth != "" && !isBearerToken(auth) {
-		auth = "Bearer " + auth
+	// 记录 model
+	if rs := reqStatsFrom(r.Context()); rs != nil {
+		rs.model = model
 	}
 
-	req, err := http.NewRequest(http.MethodPost, upstream, bytes.NewReader(rawBody))
-	if err != nil {
-		writeJSONError(w, http.StatusBadGateway, "upstream request failed: "+err.Error(), "upstream_error")
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if auth != "" {
-		req.Header.Set("Authorization", auth)
-	}
-	// Cline 需要的客户端标识
-	req.Header.Set("x-client-type", "cline-cli")
-	req.Header.Set("User-Agent", defaultUserAgent)
-
-	// 无总超时：流式响应可能长跑（对应 JS fetch 不带超时）
-	upResp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		writeJSONError(w, http.StatusBadGateway, "upstream request failed: "+err.Error(), "upstream_error")
-		return
-	}
-	defer upResp.Body.Close()
-
-	// 非流式：改写 message.reasoning -> message.reasoning_content；非 JSON 原样透传
-	if !stream {
-		body, readErr := io.ReadAll(upResp.Body)
-		if readErr != nil {
-			writeJSONError(w, http.StatusBadGateway, "upstream read failed: "+readErr.Error(), "upstream_error")
+	keys := effectiveKeys()
+	if len(keys) == 0 {
+		// 没有配置任何上游 key
+		if cfg.LoginRequired {
+			// 登录开启时，客户端 Authorization 是登录 token，不能透传上游
+			writeJSONError(w, http.StatusBadGateway, "no upstream key configured", "upstream_error")
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		out, ok := rewriteNonStream(body)
-		if !ok {
-			// 上游返回非 JSON（如错误页）：JS 用 `new Response(body, {status})` 让
-			// 平台默认给 text/plain，这里显式设置，避免 Go 的 net/http 嗅探出 text/html。
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		// 兼容模式：透传客户端自带的 Authorization
+		auth := r.Header.Get("Authorization")
+		if auth != "" && !isBearerToken(auth) {
+			auth = "Bearer " + auth
 		}
-		w.WriteHeader(upResp.StatusCode)
-		_, _ = w.Write(out)
+		upResp, err := doUpstream(upstream, rawBody, auth, nil)
+		if err != nil {
+			writeJSONError(w, http.StatusBadGateway, "upstream request failed: "+err.Error(), "upstream_error")
+			return
+		}
+		if rs := reqStatsFrom(r.Context()); rs != nil {
+			rs.key = "passthrough"
+		}
+		serveUpstreamResponse(w, upResp, stream)
 		return
 	}
 
-	// 流式：逐帧改写 SSE
-	// 无 body 的响应（如 204/304）：JS `if (!upstreamResp.body) return upstreamResp` 原样
-	// 透传上游响应（保留其头）。Go 在 204/304 时 Body 恒为空的 NoBody、Content-Length 0。
-	if upResp.ContentLength == 0 {
-		copyHeader(w.Header(), upResp.Header)
-		w.WriteHeader(upResp.StatusCode)
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.WriteHeader(upResp.StatusCode)
-	flusher, _ := w.(http.Flusher)
-
-	br := bufio.NewReader(upResp.Body)
-	for {
-		frame, readErr := readFrame(br)
-		if readErr != nil && readErr != io.EOF {
-			break // 上游连接中断：丢弃未完成帧（对应 JS TransformStream 报错中止流）
-		}
-		if len(frame) > 0 {
-			if out := processFrame(frame); out != nil {
-				_, _ = w.Write(out)
-				if flusher != nil {
-					flusher.Flush()
-				}
+	var usedKey string
+	forwardWithKeys(w, rawBody, stream, model, upstream,
+		func(m string) (string, time.Duration) {
+			k, d := keyMgr.Next(m)
+			if k != "" {
+				usedKey = k
 			}
-		}
-		if readErr != nil {
-			break // EOF：结束转发
-		}
+			return k, d
+		},
+		func(k, m string, d time.Duration) { keyMgr.MarkRateLimited(k, m, d) },
+		cfg.MaxKeyTries)
+	if rs := reqStatsFrom(r.Context()); rs != nil {
+		rs.key = usedKey
 	}
 }
 
