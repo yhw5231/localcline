@@ -26,6 +26,7 @@ type RequestRecord struct {
 	BytesOut   int64         `json:"bytes_out"`
 	ClientIP   string        `json:"client_ip,omitempty"`
 	User       string        `json:"user,omitempty"`
+	Channel    string        `json:"channel,omitempty"`
 	Model      string        `json:"model,omitempty"`
 	Key        string        `json:"key,omitempty"` // 脱敏后
 	ErrMsg     string        `json:"error,omitempty"`
@@ -78,10 +79,10 @@ func (l *RequestLog) count() int {
 // ---- 用量统计 ----
 
 type UsageTotals struct {
-	Requests    int64 `json:"requests"`
-	Errors      int64 `json:"errors"`
-	BytesOut    int64 `json:"bytes_out"`
-	DurationMs  int64 `json:"duration_ms"`
+	Requests   int64 `json:"requests"`
+	Errors     int64 `json:"errors"`
+	BytesOut   int64 `json:"bytes_out"`
+	DurationMs int64 `json:"duration_ms"`
 }
 
 type UserUsage struct {
@@ -188,6 +189,7 @@ type reqStatsKey struct{}
 // reqStats 请求内元数据：handler/proxyChat 写入，statsHandler 收尾读取。
 type reqStats struct {
 	user             string
+	channel          string
 	model            string
 	key              string
 	promptTokens     int64
@@ -251,13 +253,19 @@ func maskKey(key string) string {
 	return key[:4] + mask + key[len(key)-4:]
 }
 
-// statsHandler 包裹 handler：记录每次请求的耗时 / 状态 / 输出字节 / 用户 / 模型 / key / token。
-func statsHandler(w http.ResponseWriter, r *http.Request) {
+// statsMiddleware 包裹任意 handler：记录每次请求的耗时 / 状态 / 输出字节 / 用户 / 渠道 / 模型 / key / token。
+func statsMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		statsServe(w, r, next)
+	}
+}
+
+func statsServe(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
 	start := time.Now()
 	rs := &reqStats{}
 	rw := &responseRecorder{ResponseWriter: w, rs: rs}
 	ctx := context.WithValue(r.Context(), reqStatsKey{}, rs)
-	handler(rw, r.WithContext(ctx))
+	next(rw, r.WithContext(ctx))
 
 	status := rw.status
 	if status == 0 {
@@ -274,6 +282,7 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 		BytesOut:   rw.bytes,
 		ClientIP:   clientIP(r),
 		User:       rs.user,
+		Channel:    rs.channel,
 		Model:      rs.model,
 		Key:        rs.key,
 	}
@@ -291,6 +300,7 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 		usageDB.Append(UsageEvent{
 			Time:             start,
 			User:             rs.user,
+			Channel:          rs.channel,
 			Model:            rs.model,
 			Key:              rs.key,
 			PromptTokens:     rs.promptTokens,
@@ -350,12 +360,12 @@ func handleAdminStats(w http.ResponseWriter) {
 	sort.Slice(keys, func(i, j int) bool { return keys[i].Requests > keys[j].Requests })
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"started_at":    usageStat.StartedAt,
+		"started_at":     usageStat.StartedAt,
 		"uptime_seconds": int64(time.Since(usageStat.StartedAt).Seconds()),
-		"totals":        usageStat.Totals,
-		"by_user":       users,
-		"by_model":      models,
-		"by_key":        keys,
+		"totals":         usageStat.Totals,
+		"by_user":        users,
+		"by_model":       models,
+		"by_key":         keys,
 	})
 }
 

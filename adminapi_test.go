@@ -1,0 +1,326 @@
+// Admin API 测试：登录换 token、渠道/下游 key CRUD、鉴权边界、key 测试端点。
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+func adminToken(t *testing.T) string {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{"username":"admin","password":"admin"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rootHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("login status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var out struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.Token
+}
+
+func adminReq(method, path, body, token string) *http.Request {
+	var rd *strings.Reader
+	if body == "" {
+		rd = strings.NewReader("")
+	} else {
+		rd = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, rd)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
+func TestAdminAPIAuthRequired(t *testing.T) {
+	setupGateway(t)
+	rr := httptest.NewRecorder()
+	rootHandler(rr, adminReq(http.MethodGet, "/admin/api/state", "", ""))
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d want 401", rr.Code)
+	}
+	// 伪造 token
+	rr2 := httptest.NewRecorder()
+	rootHandler(rr2, adminReq(http.MethodGet, "/admin/api/state", "", "fake"))
+	if rr2.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d want 401", rr2.Code)
+	}
+}
+
+func TestAdminChannelCRUD(t *testing.T) {
+	setupGateway(t)
+	tok := adminToken(t)
+
+	// PUT channel
+	body := `{"name":"Cline","base_url":"https://api.cline.bot/api/v1","enabled":true,
+		"rewrite_reasoning":true,
+		"keys":[{"name":"acc1","api_key":"sk-a","enabled":true}]}`
+	rr := httptest.NewRecorder()
+	rootHandler(rr, adminReq(http.MethodPut, "/admin/api/channels", body, tok))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("put channel status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var ch Channel
+	_ = json.Unmarshal(rr.Body.Bytes(), &ch)
+	if ch.ID == "" || len(ch.Keys) != 1 || ch.Keys[0].ID == "" {
+		t.Fatalf("channel not saved properly: %+v", ch)
+	}
+
+	// state 可见
+	rr2 := httptest.NewRecorder()
+	rootHandler(rr2, adminReq(http.MethodGet, "/admin/api/state", "", tok))
+	var st struct {
+		Channels []*Channel `json:"channels"`
+	}
+	_ = json.Unmarshal(rr2.Body.Bytes(), &st)
+	if len(st.Channels) != 1 || st.Channels[0].Name != "Cline" {
+		t.Fatalf("state channels: %+v", st.Channels)
+	}
+
+	// DELETE
+	rr3 := httptest.NewRecorder()
+	rootHandler(rr3, adminReq(http.MethodDelete, "/admin/api/channels/"+ch.ID, "", tok))
+	if rr3.Code != http.StatusOK {
+		t.Fatalf("delete status=%d", rr3.Code)
+	}
+	rr4 := httptest.NewRecorder()
+	rootHandler(rr4, adminReq(http.MethodGet, "/admin/api/state", "", tok))
+	_ = json.Unmarshal(rr4.Body.Bytes(), &st)
+	if len(st.Channels) != 0 {
+		t.Fatalf("expected empty after delete")
+	}
+}
+
+func TestAdminGWKeyFlow(t *testing.T) {
+	setupGateway(t)
+	tok := adminToken(t)
+
+	// Key 为空 → 自动生成
+	rr := httptest.NewRecorder()
+	rootHandler(rr, adminReq(http.MethodPut, "/admin/api/gwkeys", `{"name":"sub2api","enabled":true}`, tok))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("put gwkey status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Key       GWKey `json:"key"`
+		Generated bool  `json:"generated"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if !resp.Generated || !strings.HasPrefix(resp.Key.Key, "sk-gw-") {
+		t.Fatalf("expected generated sk-gw key, got %+v", resp)
+	}
+
+	// 生成的 key 能通过下游鉴权
+	rr2 := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+resp.Key.Key)
+	rootHandler(rr2, req)
+	if rr2.Code == http.StatusUnauthorized {
+		t.Fatal("generated key should authenticate")
+	}
+
+	// 删除
+	rr3 := httptest.NewRecorder()
+	rootHandler(rr3, adminReq(http.MethodDelete, "/admin/api/gwkeys/"+resp.Key.ID, "", tok))
+	if rr3.Code != http.StatusOK {
+		t.Fatalf("delete gwkey status=%d", rr3.Code)
+	}
+
+	// 删除后 401
+	rr4 := httptest.NewRecorder()
+	req4 := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req4.Header.Set("Authorization", "Bearer "+resp.Key.Key)
+	rootHandler(rr4, req4)
+	if rr4.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d want 401 after delete", rr4.Code)
+	}
+}
+
+func TestAdminTestKeyEndpoint(t *testing.T) {
+	setupGateway(t)
+	tok := adminToken(t)
+	up := newUpstream(t, http.StatusOK, `{"choices":[{"message":{"content":"pong"}}]}`)
+	mustPutChannel(t, &Channel{Name: "c", BaseURL: up.URL, Enabled: true,
+		Keys: []*UpKey{{Name: "k1", APIKey: "sk-1", Enabled: true}}})
+	kid := store.Snapshot().Channels[0].Keys[0].ID
+	chid := store.Snapshot().Channels[0].ID
+
+	rr := httptest.NewRecorder()
+	rootHandler(rr, adminReq(http.MethodPost, "/admin/api/testkey",
+		`{"channel_id":"`+chid+`","key_id":"`+kid+`","model":"m1"}`, tok))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var out struct {
+		OK     bool   `json:"ok"`
+		Status int    `json:"status"`
+		Proxy  string `json:"proxy"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &out)
+	if !out.OK || out.Status != 200 || out.Proxy != "direct" {
+		t.Fatalf("testkey result: %+v", out)
+	}
+	if up.count() != 1 || up.lastAuth() != "Bearer sk-1" {
+		t.Fatalf("upstream not called correctly: calls=%d auth=%q", up.count(), up.lastAuth())
+	}
+}
+
+func TestWebUIStaticServed(t *testing.T) {
+	setupGateway(t)
+	rr := httptest.NewRecorder()
+	rootHandler(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "UniGate") {
+		t.Fatalf("index served: status=%d", rr.Code)
+	}
+	rr2 := httptest.NewRecorder()
+	rootHandler(rr2, httptest.NewRequest(http.MethodGet, "/app.js", nil))
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("app.js status=%d", rr2.Code)
+	}
+	// SPA 回落
+	rr3 := httptest.NewRecorder()
+	rootHandler(rr3, httptest.NewRequest(http.MethodGet, "/some/spa/route", nil))
+	if rr3.Code != http.StatusOK {
+		t.Fatalf("spa fallback status=%d", rr3.Code)
+	}
+}
+
+// TestSharedLeaseCrossChannelViaAdminAPI：跨渠道复用全流程（走 Admin API）——
+// 渠道 A 两个 key + 渠道 B 一个 key（同池、Share 开）→ 只需 2 个租约；
+// 删除渠道 B后租约数不变（A 仍各占一个）；删除渠道 A 后全部回收。
+func TestSharedLeaseCrossChannelViaAdminAPI(t *testing.T) {
+	setupGateway(t)
+	pool, poolSrv := startFakePool(t)
+	tok := adminToken(t)
+
+	mkKey := func(name string) *UpKey {
+		return &UpKey{Name: name, APIKey: "sk-" + name, Enabled: true,
+			Proxy: &ProxySpec{Kind: "ipv6pool", PoolURL: poolSrv.URL, Share: true}}
+	}
+	ctx := context.Background()
+
+	// 渠道 A：A1、A2（同组）
+	chA := &Channel{Name: "A", BaseURL: "https://a.example.com/v1", Enabled: true,
+		Keys: []*UpKey{mkKey("A1"), mkKey("A2")}}
+	if err := store.PutChannel(chA); err != nil {
+		t.Fatalf("PutChannel A: %v", err)
+	}
+	snapA := store.Snapshot().Channels[0]
+	if _, err := leaseMgr.Ensure(ctx, snapA.Keys[0].Proxy, snapA.Keys[0].ID, snapA.BaseURL); err != nil {
+		t.Fatalf("Ensure A1: %v", err)
+	}
+	if _, err := leaseMgr.Ensure(ctx, snapA.Keys[1].Proxy, snapA.Keys[1].ID, snapA.BaseURL); err != nil {
+		t.Fatalf("Ensure A2: %v", err)
+	}
+
+	// 渠道 B：B1（异组，应与 A1 共用）
+	chB := &Channel{Name: "B", BaseURL: "https://b.example.com/v1", Enabled: true,
+		Keys: []*UpKey{mkKey("B1")}}
+	if err := store.PutChannel(chB); err != nil {
+		t.Fatalf("PutChannel B: %v", err)
+	}
+	snapB := store.Snapshot().Channels[1]
+	rB1, err := leaseMgr.Ensure(ctx, snapB.Keys[0].Proxy, snapB.Keys[0].ID, snapB.BaseURL)
+	if err != nil {
+		t.Fatalf("Ensure B1: %v", err)
+	}
+	rA1, _ := leaseMgr.Ensure(ctx, snapA.Keys[0].Proxy, snapA.Keys[0].ID, snapA.BaseURL)
+	if rB1.Addr != rA1.Addr {
+		t.Fatalf("B1 should share A1's IP, got %s vs %s", rB1.Addr, rA1.Addr)
+	}
+	pool.mu.Lock()
+	if n := len(pool.leases); n != 2 {
+		pool.mu.Unlock()
+		t.Fatalf("expected 2 leases for 3 keys across 2 channels, got %d", n)
+	}
+	pool.mu.Unlock()
+
+	// 通过 Admin API 删除渠道 B：B1 的分配回收，但 gw-A1 仍被 A1 引用 → 租约保留
+	rr := httptest.NewRecorder()
+	rootHandler(rr, adminReq(http.MethodDelete, "/admin/api/channels/"+chB.ID, "", tok))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("delete B: %d", rr.Code)
+	}
+	pool.mu.Lock()
+	if n := len(pool.leases); n != 2 {
+		pool.mu.Unlock()
+		t.Fatalf("channel B removal must not release leases still used by A, got %d", n)
+	}
+	pool.mu.Unlock()
+
+	// 删除渠道 A：全部回收
+	rr2 := httptest.NewRecorder()
+	rootHandler(rr2, adminReq(http.MethodDelete, "/admin/api/channels/"+chA.ID, "", tok))
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("delete A: %d", rr2.Code)
+	}
+	pool.mu.Lock()
+	if n := len(pool.leases); n != 0 {
+		pool.mu.Unlock()
+		t.Fatalf("expected all leases released, got %d", n)
+	}
+	pool.mu.Unlock()
+}
+
+// TestPoolRotateByLeaseID：按 lease_id 直接操作本地代理池条目。
+func TestPoolRotateByLeaseID(t *testing.T) {
+	setupGateway(t)
+	pool, poolSrv := startFakePool(t)
+	tok := adminToken(t)
+	socksAddr := startFakeSocks5(t)
+	socksPort, _ := strconv.Atoi(socksAddr[strings.LastIndex(socksAddr, ":")+1:])
+	pool.portOverride = socksPort
+
+	up := newUpstream(t, http.StatusOK, `{"choices":[{"message":{"content":"pong"}}]}`)
+	mustPutChannel(t, &Channel{Name: "c", BaseURL: up.URL, Enabled: true,
+		Keys: []*UpKey{{Name: "k1", APIKey: "sk-1", Enabled: true,
+			Proxy: &ProxySpec{Kind: "ipv6pool", PoolURL: poolSrv.URL,
+				SocksHost: socksAddr[:strings.LastIndex(socksAddr, ":")]}}}})
+
+	// 先产生一次真实请求，使租约进入本地缓存（经 SOCKS5 stub 隧道）
+	rr := httptest.NewRecorder()
+	forwardChat(rr, chatRequest("m1"), nil, false, "m1")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("precondition: forwardChat status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// lease 列表应有 1 条，取其 lease_id
+	infos := leaseMgr.ListLeases()
+	if len(infos) != 1 {
+		t.Fatalf("expected 1 cached lease, got %d", len(infos))
+	}
+
+	rr2 := httptest.NewRecorder()
+	body := `{"pool_url":"` + poolSrv.URL + `","lease_id":"` + infos[0].LeaseID + `"}`
+	rootHandler(rr2, adminReq(http.MethodPost, "/admin/api/pool/rotate", body, tok))
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("rotate by lease_id status=%d body=%s", rr2.Code, rr2.Body.String())
+	}
+	pool.mu.Lock()
+	n := pool.rotateN
+	pool.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("expected pool rotate called once, got %d", n)
+	}
+
+	rr3 := httptest.NewRecorder()
+	rootHandler(rr3, adminReq(http.MethodPost, "/admin/api/pool/release", body, tok))
+	if rr3.Code != http.StatusOK {
+		t.Fatalf("release by lease_id status=%d body=%s", rr3.Code, rr3.Body.String())
+	}
+	if infos := leaseMgr.ListLeases(); len(infos) != 0 {
+		t.Fatalf("expected empty local pool after release, got %d", len(infos))
+	}
+}

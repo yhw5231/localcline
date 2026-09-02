@@ -1,19 +1,23 @@
 services:
-  cline2api:
+  unigate:
     build:
       context: .
       dockerfile: Dockerfile
-    image: cline2api:local
-    container_name: cline2api
+    image: unigate:local
+    container_name: unigate
     restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
       PORT: "8080"
       DATA_DIR: /data
-      # 客户端指纹头（默认与官方 Cline VSCode 客户端一致，按需覆盖；设空则不发送该头）
-      # CLIENT_USER_AGENT: Cline/4.1.16
-      # CLIENT_TYPE: cline-vscode
-      # CLIENT_HEADERS: '{"x-client-type":"cline-cli","x-my-header":"abc"}'
+      # WebUI 管理员（默认 admin/admin，务必修改）
+      # ADMIN_USERNAME: admin
+      # ADMIN_PASSWORD: admin
+      # 下游是否强制通用 key（默认 true）
+      # GW_KEY_AUTH: "true"
+      # 故障转移冷却（可按需调整）
+      # RATE_LIMIT_COOLDOWN: 1h
+      # AUTH_FAIL_COOLDOWN: 10m
     volumes:
       - ./data:/data

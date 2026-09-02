@@ -26,7 +26,7 @@ func TestVerifyLogin(t *testing.T) {
 func TestVerifyLoginExtraUsers(t *testing.T) {
 	t.Setenv("EXTRA_USERS", "user1:pass1,user2:pass2")
 	t.Setenv("LOGIN_REQUIRED", "true") // 确保 reloadConfig 能正确读取
-	reloadConfig()
+	resetCfgForTest()
 
 	if !verifyLogin("user1", "pass1") {
 		t.Error("user1/pass1 should be valid")
@@ -38,7 +38,7 @@ func TestVerifyLoginExtraUsers(t *testing.T) {
 		t.Error("user1/wrong should be invalid")
 	}
 	// 恢复
-	reloadConfig()
+	resetCfgForTest()
 }
 
 func TestIssueAndVerifyToken(t *testing.T) {
@@ -73,8 +73,8 @@ func TestVerifyTokenMalformed(t *testing.T) {
 
 func TestVerifyTokenExpired(t *testing.T) {
 	t.Setenv("TOKEN_TTL", "1s")
-	reloadConfig()
-	defer reloadConfig()
+	resetCfgForTest()
+	defer resetCfgForTest()
 
 	token, err := issueToken("admin")
 	if err != nil {
@@ -161,8 +161,8 @@ func TestRequireAuth(t *testing.T) {
 
 	// 过期 token
 	t.Setenv("TOKEN_TTL", "1s")
-	reloadConfig()
-	defer reloadConfig()
+	resetCfgForTest()
+	defer resetCfgForTest()
 	expToken, _ := issueToken("admin")
 	time.Sleep(2100 * time.Millisecond)
 	rr3 := httptest.NewRecorder()

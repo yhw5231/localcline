@@ -19,6 +19,7 @@ type UsageEvent struct {
 	ID               string    `json:"id"`
 	Time             time.Time `json:"time"`
 	User             string    `json:"user,omitempty"`
+	Channel          string    `json:"channel,omitempty"`
 	Model            string    `json:"model,omitempty"`
 	Key              string    `json:"key,omitempty"` // 上游 key（原始，内部记账用）
 	PromptTokens     int64     `json:"prompt_tokens"`
@@ -42,6 +43,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	time INTEGER NOT NULL,
 	user TEXT NOT NULL DEFAULT '',
+	channel TEXT NOT NULL DEFAULT '',
 	model TEXT NOT NULL DEFAULT '',
 	key TEXT NOT NULL DEFAULT '',
 	prompt_tokens INTEGER NOT NULL DEFAULT 0,
@@ -53,7 +55,13 @@ CREATE INDEX IF NOT EXISTS idx_usage_time ON usage_events(time);
 CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_events(user);
 CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_events(model);
 CREATE INDEX IF NOT EXISTS idx_usage_key ON usage_events(key);
+CREATE INDEX IF NOT EXISTS idx_usage_channel ON usage_events(channel);
 `
+
+// usageMigrations 老库补列（ALTER TABLE 幂等性由检查保证）。
+var usageMigrations = []string{
+	`ALTER TABLE usage_events ADD COLUMN channel TEXT NOT NULL DEFAULT ''`,
+}
 
 func newUsageDB(path string, retentionDays, maxRecords int) *UsageDB {
 	db := &UsageDB{
@@ -79,9 +87,17 @@ func newUsageDB(path string, retentionDays, maxRecords int) *UsageDB {
 	sqldb.SetMaxOpenConns(1)
 	db.db = sqldb
 	if _, err := sqldb.Exec(usageSchema); err == nil {
+		db.migrate(sqldb)
 		db.cleanupLocked()
 	}
 	return db
+}
+
+// migrate 执行增量迁移（列已存在时忽略错误）。
+func (db *UsageDB) migrate(sqldb *sql.DB) {
+	for _, stmt := range usageMigrations {
+		_, _ = sqldb.Exec(stmt)
+	}
 }
 
 // Close 关闭底层连接。
@@ -102,9 +118,9 @@ func (db *UsageDB) Append(ev UsageEvent) {
 		return
 	}
 	_, err := db.db.Exec(`INSERT INTO usage_events
-		(time, user, model, key, prompt_tokens, completion_tokens, status, bytes_out)
-		VALUES (?,?,?,?,?,?,?,?)`,
-		ev.Time.UnixNano(), ev.User, ev.Model, ev.Key,
+		(time, user, channel, model, key, prompt_tokens, completion_tokens, status, bytes_out)
+		VALUES (?,?,?,?,?,?,?,?,?)`,
+		ev.Time.UnixNano(), ev.User, ev.Channel, ev.Model, ev.Key,
 		ev.PromptTokens, ev.CompletionTokens, ev.Status, ev.BytesOut)
 	if err != nil {
 		return
@@ -150,12 +166,13 @@ func (db *UsageDB) Count() int64 {
 
 // UsageFilter 查询条件。
 type UsageFilter struct {
-	Window string // "today" | "24h" | "7d" | "30d" | "all"（默认 all）
-	Start  time.Time
-	End    time.Time
-	User   string
-	Model  string
-	Key    string
+	Window  string // "today" | "24h" | "7d" | "30d" | "all"（默认 all）
+	Start   time.Time
+	End     time.Time
+	User    string
+	Channel string
+	Model   string
+	Key     string
 }
 
 // UsageBreakdown 单维度聚合。
@@ -181,6 +198,7 @@ type UsageResult struct {
 	CompletionTokens int64            `json:"completion_tokens"`
 	TotalTokens      int64            `json:"total_tokens"`
 	ByUser           []UsageBreakdown `json:"by_user,omitempty"`
+	ByChannel        []UsageBreakdown `json:"by_channel,omitempty"`
 	ByModel          []UsageBreakdown `json:"by_model,omitempty"`
 	ByKey            []UsageBreakdown `json:"by_key,omitempty"`
 }
@@ -226,6 +244,10 @@ func buildWhere(f UsageFilter) (string, []any) {
 	if f.User != "" {
 		conds = append(conds, "user = ?")
 		args = append(args, f.User)
+	}
+	if f.Channel != "" {
+		conds = append(conds, "channel = ?")
+		args = append(args, f.Channel)
 	}
 	if f.Model != "" {
 		conds = append(conds, "model = ?")
@@ -276,6 +298,7 @@ func (db *UsageDB) Query(f UsageFilter) UsageResult {
 	res.TotalTokens = promptTok + compTok
 
 	res.ByUser = db.queryBreakdown(where, args, "user")
+	res.ByChannel = db.queryBreakdown(where, args, "channel")
 	res.ByModel = db.queryBreakdown(where, args, "model")
 	res.ByKey = db.queryBreakdown(where, args, "key")
 	return res
@@ -318,10 +341,11 @@ func initUsageDB() {
 // handleAdminUsage 返回窗口化用量统计（?window=&user=&model=&key=）。
 func handleAdminUsage(w http.ResponseWriter, r *http.Request) {
 	f := UsageFilter{
-		Window: r.URL.Query().Get("window"),
-		User:   r.URL.Query().Get("user"),
-		Model:  r.URL.Query().Get("model"),
-		Key:    r.URL.Query().Get("key"),
+		Window:  r.URL.Query().Get("window"),
+		User:    r.URL.Query().Get("user"),
+		Channel: r.URL.Query().Get("channel"),
+		Model:   r.URL.Query().Get("model"),
+		Key:     r.URL.Query().Get("key"),
 	}
 	if f.Window == "" {
 		f.Window = "today"
@@ -332,9 +356,5 @@ func handleAdminUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res := usageDB.Query(f)
-	// by_key 对返回结果脱敏
-	for i := range res.ByKey {
-		res.ByKey[i].Name = maskKey(res.ByKey[i].Name)
-	}
 	writeJSON(w, http.StatusOK, res)
 }

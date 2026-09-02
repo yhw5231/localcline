@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UniGate · 通用网关</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<!-- 登录视图 -->
+<div id="loginView" class="login-wrap hidden">
+  <form id="loginForm" class="login-card">
+    <h1>UniGate</h1>
+    <p class="muted">通用 AI 网关控制台</p>
+    <label>用户名 <input id="loginUser" autocomplete="username" required></label>
+    <label>密码 <input id="loginPass" type="password" autocomplete="current-password" required></label>
+    <div id="loginErr" class="err hidden"></div>
+    <button type="submit" class="btn primary block">登录</button>
+  </form>
+</div>
+
+<!-- 主视图 -->
+<div id="appView" class="hidden">
+  <header class="topbar">
+    <div class="brand">UniGate <span class="muted">通用网关</span></div>
+    <nav class="tabs">
+      <button data-tab="channels" class="tab active">渠道</button>
+      <button data-tab="gwkeys" class="tab">通用密钥</button>
+      <button data-tab="logs" class="tab">请求日志</button>
+      <button data-tab="usage" class="tab">用量统计</button>
+      <button data-tab="leases" class="tab">代理池</button>
+    </nav>
+    <div class="spacer"></div>
+    <span id="whoami" class="muted"></span>
+    <button id="logoutBtn" class="btn ghost">退出</button>
+  </header>
+
+  <main id="main">
+    <!-- 渠道 -->
+    <section id="tab-channels" class="tabpane">
+      <div class="row">
+        <h2>渠道</h2>
+        <div class="spacer"></div>
+        <button id="addChannelBtn" class="btn primary">+ 新建渠道</button>
+      </div>
+      <div id="channelList" class="channel-list"></div>
+    </section>
+
+    <!-- 通用密钥 -->
+    <section id="tab-gwkeys" class="tabpane hidden">
+      <div class="row">
+        <h2>下游通用密钥</h2>
+        <div class="spacer"></div>
+        <button id="addGWKeyBtn" class="btn primary">+ 生成密钥</button>
+      </div>
+      <p class="muted">客户端以 <code>Authorization: Bearer &lt;通用密钥&gt;</code> 调用 <code>/v1/chat/completions</code> 与 <code>/v1/models</code>。网关按渠道顺序 + key 顺序做故障转移。</p>
+      <table class="tbl" id="gwKeyTable">
+        <thead><tr><th>名称</th><th>密钥</th><th>状态</th><th>创建时间</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <!-- 日志 -->
+    <section id="tab-logs" class="tabpane hidden">
+      <div class="row">
+        <h2>请求日志</h2>
+        <div class="spacer"></div>
+        <label class="inline"><input type="checkbox" id="logsAuto"> 自动刷新</label>
+        <button id="logsRefresh" class="btn">刷新</button>
+      </div>
+      <table class="tbl" id="logTable">
+        <thead><tr><th>时间</th><th>状态</th><th>耗时</th><th>渠道</th><th>key</th><th>模型</th><th>下游</th><th>出口</th><th>错误</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <!-- 本地代理池 -->
+    <section id="tab-leases" class="tabpane hidden">
+      <div class="row">
+        <h2>本地代理池</h2>
+        <div class="spacer"></div>
+        <label class="inline"><input type="checkbox" id="leasesAuto"> 自动刷新</label>
+        <button id="leasesRefresh" class="btn">刷新</button>
+      </div>
+      <p class="muted">网关当前持有的 IPv6 池租约（申请后缓存在本地，重启后自动复用池端同 ID 租约）。开启「跨渠道复用」的租约会显示其占用的全部分组（BaseURL）——同一分组不会重复出现在同一租约上。</p>
+      <table class="tbl" id="leaseTable">
+        <thead><tr><th>池</th><th>租约 ID</th><th>占用分组</th><th>出口 IPv6</th><th>SOCKS 端口</th><th>模式</th><th>请求计数</th><th>最近换IP</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <!-- 用量 -->
+    <section id="tab-usage" class="tabpane hidden">
+      <div class="row">
+        <h2>用量统计</h2>
+        <div class="spacer"></div>
+        <select id="usageWindow">
+          <option value="today">今天</option>
+          <option value="24h">24 小时</option>
+          <option value="7d">7 天</option>
+          <option value="30d">30 天</option>
+          <option value="all">全部</option>
+        </select>
+      </div>
+      <div id="usageCards" class="cards"></div>
+      <div id="usageTables"></div>
+    </section>
+  </main>
+</div>
+
+<!-- 渠道编辑弹窗 -->
+<div id="channelModal" class="modal hidden">
+  <div class="modal-card wide">
+    <div class="modal-head">
+      <h3 id="channelModalTitle">编辑渠道</h3>
+      <button class="btn ghost" data-close="channelModal">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="grid2">
+        <label>渠道名称 <input id="chName" placeholder="如 Cline / OpenRouter"></label>
+        <label>Base URL（OpenAI 兼容前缀） <input id="chBaseURL" placeholder="https://api.cline.bot/api/v1"></label>
+      </div>
+      <div class="grid2">
+        <label>模型列表端点（可选，默认 BaseURL + /models） <input id="chModelsURL" placeholder="留空使用默认"></label>
+        <label>静态模型列表（每行一个，用于 /v1/models 与路由过滤；留空不设限） <textarea id="chModels" rows="2" placeholder="deepseek/deepseek-v4-flash&#10;gpt-4o-mini"></textarea></label>
+      </div>
+      <div class="row">
+        <label class="inline"><input type="checkbox" id="chEnabled"> 启用渠道</label>
+        <label class="inline" title="把上游返回的 reasoning 字段复制为 reasoning_content（Cline 渠道需要）"><input type="checkbox" id="chRewrite"> reasoning→reasoning_content 改写</label>
+      </div>
+      <h4>自定义请求头</h4>
+      <div id="chHeaders"></div>
+      <button class="btn small" id="addHeaderBtn">+ 添加请求头</button>
+
+      <h4>上游 Key（按顺序故障转移）</h4>
+      <div id="chKeys"></div>
+      <button class="btn small" id="addKeyBtn">+ 添加 Key</button>
+    </div>
+    <div class="modal-foot">
+      <span id="channelErr" class="err"></span>
+      <div class="spacer"></div>
+      <button class="btn" data-close="channelModal">取消</button>
+      <button class="btn primary" id="channelSaveBtn">保存</button>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

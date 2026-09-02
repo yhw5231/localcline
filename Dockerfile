@@ -6,6 +6,7 @@ COPY third_party ./third_party
 ARG GOPROXY=https://goproxy.cn,direct
 RUN GOPROXY=${GOPROXY} go mod download
 COPY *.go ./
+COPY web ./web
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/cline2api .
 
 FROM alpine:3.22
