@@ -1,4 +1,6 @@
-// 冷却表：按 (上游 keyID, model) 记录故障冷却，路由引擎据此跳过不可用 key。
+// 冷却表：按 (上游 keyID, model 部分) 记录故障冷却，路由引擎据此跳过不可用 key。
+// model 部分由渠道级冷却粒度开关决定：默认按 key 跨模型共享（传空串），
+// 渠道显式 "key_model" 时按 (key, model) 独立冷却。
 // 不同上游故障使用不同冷却时长：429 按 Retry-After（缺省 RATE_LIMIT_COOLDOWN）、
 // 鉴权失败（401/403）用 AUTH_FAIL_COOLDOWN、服务端错误（5xx）用 SERVER_ERR_COOLDOWN、
 // 网络错误用 NET_ERR_COOLDOWN。
@@ -50,15 +52,15 @@ func (c *Cooldowns) Mark(keyID, model string, dur time.Duration) {
 	}
 }
 
-// EarliestRetry 返回给定候选 key 集合中最早的冷却到期剩余时长；
-// 全部未冷却返回 0, false。
-func (c *Cooldowns) EarliestRetry(keyIDs []string, model string) (time.Duration, bool) {
+// EarliestRetry 返回给定冷却键（keyID+model 部分，由调用方按渠道粒度生成）
+// 集合中最早的冷却到期剩余时长；全部未冷却返回 0, false。
+func (c *Cooldowns) EarliestRetry(pairs []cooldownPair) (time.Duration, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
 	var earliest time.Time
-	for _, id := range keyIDs {
-		until, ok := c.until[cooldownPair{id, model}]
+	for _, p := range pairs {
+		until, ok := c.until[p]
 		if ok && now.Before(until) {
 			if earliest.IsZero() || until.Before(earliest) {
 				earliest = until

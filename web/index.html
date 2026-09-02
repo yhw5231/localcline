@@ -127,6 +127,12 @@
       <div class="row">
         <label class="inline"><input type="checkbox" id="chEnabled"> 启用渠道</label>
         <label class="inline" title="把上游返回的 reasoning 字段复制为 reasoning_content（Cline 渠道需要）"><input type="checkbox" id="chRewrite"> reasoning→reasoning_content 改写</label>
+        <label class="inline" title="按 Key：某模型故障即冷停该 key 的所有模型（适合 key 配额共享的上游）；按 (Key, 模型)：某模型故障只冷却该 key 的该模型">冷却粒度
+          <select id="chCooldownScope">
+            <option value="key">按 Key（跨模型共享）</option>
+            <option value="key_model">按 (Key, 模型)</option>
+          </select>
+        </label>
       </div>
       <h4>自定义请求头</h4>
       <div id="chHeaders"></div>

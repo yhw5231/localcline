@@ -2,7 +2,9 @@
 // 失败时自动故障转移到下一个 key/渠道。
 //
 // 候选顺序：渠道在配置中的顺序即优先级；同一渠道内按 key 顺序。
-// 每次请求最多尝试 cfg.MaxRouteTries 个候选；命中冷却 (keyID, model) 的候选直接跳过。
+// 每次请求最多尝试 cfg.MaxRouteTries 个候选；命中冷却的候选直接跳过。
+// 冷却键粒度为渠道级开关 cooldown_scope："key"（默认，含旧配置空值）按 key 跨模型
+// 共享冷却（一个模型触发故障即冷停该 key 的所有模型）；"key_model" 按 (keyID, model) 独立冷却。
 // 故障分类与冷却：
 //   - 网络错误            → NET_ERR_COOLDOWN（默认 15s），可配置自动换出口 IP
 //   - 429                 → Retry-After（缺省 RATE_LIMIT_COOLDOWN，默认 1h）
@@ -25,6 +27,15 @@ import (
 type candidate struct {
 	ch *Channel
 	k  *UpKey
+}
+
+// cooldownModel 返回冷却键中 model 部分的取值：渠道粒度为 "key_model" 时按
+// (key, model) 独立冷却；默认 "" / "key"（含旧配置空值）按 key 跨模型共享冷却。
+func (c *candidate) cooldownModel(model string) string {
+	if c.ch.CooldownScope == cooldownScopeKeyModel {
+		return model
+	}
+	return ""
 }
 
 // chatTarget 返回该候选的上游 chat 端点（key BaseURL 优先）。
@@ -160,7 +171,8 @@ func forwardChat(w http.ResponseWriter, r *http.Request, rawBody []byte, stream 
 		if attempts >= maxTries {
 			break
 		}
-		if cool.IsCooling(cand.k.ID, model) {
+		cm := cand.cooldownModel(model)
+		if cool.IsCooling(cand.k.ID, cm) {
 			continue
 		}
 		attempts++
@@ -169,7 +181,7 @@ func forwardChat(w http.ResponseWriter, r *http.Request, rawBody []byte, stream 
 		if err != nil {
 			lastErr = "resolve proxy: " + err.Error()
 			log.Printf("route: key %s proxy resolve failed: %v", cand.k.Name, err)
-			cool.Mark(cand.k.ID, model, cfg.NetErrCooldown)
+			cool.Mark(cand.k.ID, cm, cfg.NetErrCooldown)
 			continue
 		}
 
@@ -177,7 +189,7 @@ func forwardChat(w http.ResponseWriter, r *http.Request, rawBody []byte, stream 
 		resp, err := doUpstreamRequest(r.Context(), client, &cand, rawBody)
 		if err != nil {
 			lastErr = "upstream: " + err.Error()
-			cool.Mark(cand.k.ID, model, cfg.NetErrCooldown)
+			cool.Mark(cand.k.ID, cm, cfg.NetErrCooldown)
 			rotateOnNetErr(&cand)
 			continue
 		}
@@ -186,7 +198,7 @@ func forwardChat(w http.ResponseWriter, r *http.Request, rawBody []byte, stream 
 		case resp.StatusCode == http.StatusTooManyRequests:
 			rateLimited = true
 			d := retryAfterDuration(resp.Header.Get("Retry-After"), cfg.RateLimitCooldown)
-			cool.Mark(cand.k.ID, model, d)
+			cool.Mark(cand.k.ID, cm, d)
 			leaseMgr.RecordUse(cand.k.Proxy, cand.k.ID)
 			maybeRotate(&cand, resp.StatusCode)
 			io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
@@ -194,14 +206,14 @@ func forwardChat(w http.ResponseWriter, r *http.Request, rawBody []byte, stream 
 			lastErr = "upstream 429"
 			continue
 		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-			cool.Mark(cand.k.ID, model, cfg.AuthFailCooldown)
+			cool.Mark(cand.k.ID, cm, cfg.AuthFailCooldown)
 			maybeRotate(&cand, resp.StatusCode)
 			io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()
 			lastErr = "upstream auth failed"
 			continue
 		case resp.StatusCode >= 500:
-			cool.Mark(cand.k.ID, model, cfg.ServerErrCooldown)
+			cool.Mark(cand.k.ID, cm, cfg.ServerErrCooldown)
 			maybeRotate(&cand, resp.StatusCode)
 			io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()
@@ -221,11 +233,12 @@ func forwardChat(w http.ResponseWriter, r *http.Request, rawBody []byte, stream 
 	}
 
 	if rateLimited {
-		ids := make([]string, 0, len(cands))
+		// 按各候选渠道的冷却粒度构建冷却键（渠道可能混用两种粒度）
+		pairs := make([]cooldownPair, 0, len(cands))
 		for _, c := range cands {
-			ids = append(ids, c.k.ID)
+			pairs = append(pairs, cooldownPair{c.k.ID, c.cooldownModel(model)})
 		}
-		if d, ok := cool.EarliestRetry(ids, model); ok {
+		if d, ok := cool.EarliestRetry(pairs); ok {
 			secs := int64(d.Seconds()) + 1
 			w.Header().Set("Retry-After", strconv.FormatInt(secs, 10))
 			writeJSONError(w, http.StatusTooManyRequests,

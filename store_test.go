@@ -56,13 +56,26 @@ func TestStoreChannelValidation(t *testing.T) {
 	if err := s.PutChannel(&Channel{Name: "x", BaseURL: "http://x", Keys: []*UpKey{{Name: "k", Enabled: true, Proxy: &ProxySpec{Kind: "bogus"}}}}); err == nil {
 		t.Fatal("expected bogus proxy kind rejected")
 	}
+	if err := s.PutChannel(&Channel{Name: "x", BaseURL: "http://x", CooldownScope: "bogus"}); err == nil {
+		t.Fatal("expected bogus cooldown_scope rejected")
+	}
+	// 冷却粒度归一化："" 与 "key" 变体 → key（默认）；"key_model" 变体保持
+	for raw, want := range map[string]string{"": "key", "key": "key", "KEY": "key", " Key ": "key", "key_model": "key_model", "KEY-MODEL": "key_model"} {
+		ch := &Channel{Name: "x", BaseURL: "http://x", CooldownScope: raw}
+		if err := s.PutChannel(ch); err != nil {
+			t.Fatalf("cooldown scope %q: %v", raw, err)
+		}
+		if got := s.Snapshot().Channels; got[len(got)-1].CooldownScope != want {
+			t.Fatalf("cooldown scope %q normalized to %q, want %q", raw, got[len(got)-1].CooldownScope, want)
+		}
+	}
 	// ipv6pool 无 scheme 自动补 http://
 	ch := &Channel{Name: "x", BaseURL: "http://x", Enabled: true, Keys: []*UpKey{{Name: "k", Enabled: true, Proxy: &ProxySpec{Kind: "ipv6pool", PoolURL: "1.2.3.4:8080"}}}}
 	if err := s.PutChannel(ch); err != nil {
 		t.Fatalf("ipv6pool normalize: %v", err)
 	}
-	if got := s.Snapshot().Channels[0].Keys[0].Proxy.PoolURL; got != "http://1.2.3.4:8080" {
-		t.Fatalf("pool url normalized to %q", got)
+	if got := s.Snapshot().Channels; got[len(got)-1].Keys[0].Proxy.PoolURL != "http://1.2.3.4:8080" {
+		t.Fatalf("pool url normalized to %q", got[len(got)-1].Keys[0].Proxy.PoolURL)
 	}
 }
 

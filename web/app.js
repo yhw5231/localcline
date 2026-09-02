@@ -122,6 +122,7 @@ function renderChannels() {
         <span class="name">${esc(ch.name)}</span>
         <span class="muted">${esc(ch.base_url)}</span>
         ${ch.rewrite_reasoning ? '<span class="badge info">reasoning改写</span>' : ""}
+        ${ch.cooldown_scope === "key_model" ? '<span class="badge info">按(Key,模型)冷却</span>' : ""}
         <span class="spacer"></span>
         <button class="btn small" data-act="edit">编辑</button>
         <button class="btn small danger" data-act="del">删除</button>
@@ -160,7 +161,7 @@ function proxyDesc(p) {
 // ---- 渠道编辑器 ----
 $("#addChannelBtn").addEventListener("click", () => openChannelEditor({
   id: "", name: "", base_url: "", models_url: "", models: [], headers: {},
-  rewrite_reasoning: false, enabled: true, keys: [],
+  rewrite_reasoning: false, cooldown_scope: "key", enabled: true, keys: [],
 }));
 
 function openChannelEditor(ch) {
@@ -172,6 +173,7 @@ function openChannelEditor(ch) {
   $("#chModels").value = (ch.models || []).join("\n");
   $("#chEnabled").checked = !!ch.enabled;
   $("#chRewrite").checked = !!ch.rewrite_reasoning;
+  $("#chCooldownScope").value = ch.cooldown_scope === "key_model" ? "key_model" : "key";
   renderHeaderRows(ch.headers || {});
   renderKeyBlocks(ch.keys || []);
   $("#channelErr").textContent = "";
@@ -338,6 +340,7 @@ $("#channelSaveBtn").addEventListener("click", async () => {
     models,
     headers,
     rewrite_reasoning: $("#chRewrite").checked,
+    cooldown_scope: $("#chCooldownScope").value,
     enabled: $("#chEnabled").checked,
     keys,
   };

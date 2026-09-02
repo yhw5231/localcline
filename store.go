@@ -83,15 +83,31 @@ type UpKey struct {
 
 // Channel 一个上游渠道（OpenAI 兼容供应商）。
 type Channel struct {
-	ID        string            `json:"id"`
-	Name      string            `json:"name"`
-	BaseURL   string            `json:"base_url"`             // 如 https://api.cline.bot/api/v1
-	ModelsURL string            `json:"models_url,omitempty"` // 模型列表端点；默认 BaseURL + /models
-	Models    []string          `json:"models,omitempty"`     // 静态模型列表（用于 /v1/models 聚合与路由过滤）
-	Headers   map[string]string `json:"headers,omitempty"`    // 渠道级自定义请求头
-	Rewrite   bool              `json:"rewrite_reasoning"`    // reasoning -> reasoning_content 改写（Cline 等需要）
-	Enabled   bool              `json:"enabled"`
-	Keys      []*UpKey          `json:"keys"`
+	ID            string            `json:"id"`
+	Name          string            `json:"name"`
+	BaseURL       string            `json:"base_url"`             // 如 https://api.cline.bot/api/v1
+	ModelsURL     string            `json:"models_url,omitempty"` // 模型列表端点；默认 BaseURL + /models
+	Models        []string          `json:"models,omitempty"`     // 静态模型列表（用于 /v1/models 聚合与路由过滤）
+	Headers       map[string]string `json:"headers,omitempty"`    // 渠道级自定义请求头
+	Rewrite       bool              `json:"rewrite_reasoning"`    // reasoning -> reasoning_content 改写（Cline 等需要）
+	CooldownScope string            `json:"cooldown_scope,omitempty"` // 冷却粒度："" / "key" 按 key 跨模型共享（默认）；"key_model" 按 (key,model)
+	Enabled       bool              `json:"enabled"`
+	Keys          []*UpKey          `json:"keys"`
+}
+
+// cooldownScopeKeyModel 冷却粒度：按 (key, model) 独立冷却（显式选择时使用）。
+const cooldownScopeKeyModel = "key_model"
+
+// normalizeCooldownScope 归一化冷却粒度（"" 视为默认 key）。
+func normalizeCooldownScope(scope string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(scope)) {
+	case cooldownScopeKeyModel, "key-model":
+		return cooldownScopeKeyModel, nil
+	case "", "key":
+		return "key", nil
+	default:
+		return "", fmt.Errorf("unsupported cooldown_scope %q (want \"key\" / \"key_model\")", scope)
+	}
 }
 
 // chatURL 返回该渠道的 chat/completions 端点。
@@ -274,6 +290,11 @@ func normalizeChannel(ch *Channel) error {
 	if ch.BaseURL == "" {
 		return errors.New("channel base_url required")
 	}
+	scope, err := normalizeCooldownScope(ch.CooldownScope)
+	if err != nil {
+		return err
+	}
+	ch.CooldownScope = scope
 	if ch.Keys == nil {
 		ch.Keys = []*UpKey{}
 	}

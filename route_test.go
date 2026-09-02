@@ -210,7 +210,7 @@ func TestAuthFailCooldown(t *testing.T) {
 	setupGateway(t)
 	up1 := newUpstream(t, http.StatusUnauthorized, `{"error":"bad key"}`)
 	up2 := newUpstream(t, http.StatusOK, `{"choices":[{"message":{"content":"ok"}}]}`)
-	mustPutChannel(t, &Channel{Name: "c", BaseURL: up1.srv.URL, Enabled: true,
+	mustPutChannel(t, &Channel{Name: "c", BaseURL: up1.srv.URL, Enabled: true, CooldownScope: "key_model",
 		Keys: []*UpKey{
 			{Name: "k1", APIKey: "sk-1", Enabled: true},
 			{Name: "k2", APIKey: "sk-2", Enabled: true, BaseURL: up2.srv.URL},
@@ -477,6 +477,61 @@ func TestCooldowns(t *testing.T) {
 	time.Sleep(60 * time.Millisecond)
 	if c.IsCooling("k", "m") {
 		t.Fatal("expected expiry")
+	}
+}
+
+// TestCooldownScopeDefaultIsKey 默认冷却粒度为按 key：一个模型的故障冷却对该
+// key 的所有模型生效（含旧配置空值）；显式 "key_model" 时不同模型互不影响。
+func TestCooldownScopeDefaultIsKey(t *testing.T) {
+	setupGateway(t)
+	up1 := newUpstream(t, http.StatusTooManyRequests, `{"error":"rate limited"}`)
+	up2 := newUpstream(t, http.StatusOK, `{"choices":[{"message":{"content":"ok"}}]}`)
+	mustPutChannel(t, &Channel{Name: "bykey", BaseURL: up1.srv.URL, Enabled: true,
+		Keys: []*UpKey{
+			{Name: "k1", APIKey: "sk-1", Enabled: true},
+			{Name: "k2", APIKey: "sk-2", Enabled: true, BaseURL: up2.srv.URL},
+		}})
+
+	// m1 触发 429 → k1 按 key 冷却
+	rr := httptest.NewRecorder()
+	forwardChat(rr, chatRequest("m1"), nil, false, "m1")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	// 换模型 m2：k1 仍应被跳过（跨模型共享冷却）
+	rr2 := httptest.NewRecorder()
+	forwardChat(rr2, chatRequest("m2"), nil, false, "m2")
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr2.Code, rr2.Body.String())
+	}
+	if up1.count() != 1 {
+		t.Fatalf("default scope=key: m2 must skip cooling k1, up1 calls = %d", up1.count())
+	}
+}
+
+func TestCooldownScopeKeyModel(t *testing.T) {
+	setupGateway(t)
+	up1 := newUpstream(t, http.StatusTooManyRequests, `{"error":"rate limited"}`)
+	up2 := newUpstream(t, http.StatusOK, `{"choices":[{"message":{"content":"ok"}}]}`)
+	mustPutChannel(t, &Channel{Name: "permodel", BaseURL: up1.srv.URL, Enabled: true, CooldownScope: "key_model",
+		Keys: []*UpKey{
+			{Name: "k1", APIKey: "sk-1", Enabled: true},
+			{Name: "k2", APIKey: "sk-2", Enabled: true, BaseURL: up2.srv.URL},
+		}})
+
+	rr := httptest.NewRecorder()
+	forwardChat(rr, chatRequest("m1"), nil, false, "m1")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	// key_model 粒度：m1 的冷却不影响 k1 对 m2 的可用性 → k1 再次被尝试
+	rr2 := httptest.NewRecorder()
+	forwardChat(rr2, chatRequest("m2"), nil, false, "m2")
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr2.Code, rr2.Body.String())
+	}
+	if up1.count() != 2 {
+		t.Fatalf("scope=key_model: m2 must retry k1, up1 calls = %d", up1.count())
 	}
 }
 
