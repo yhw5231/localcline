@@ -242,8 +242,8 @@ func TestIsStreamRequest(t *testing.T) {
 
 func TestProxyChatNonStream(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if ct := r.Header.Get("x-client-type"); ct != "cline-cli" {
-			t.Errorf("x-client-type = %q, want cline-cli", ct)
+		if ct := r.Header.Get("x-client-type"); ct != cfg.ClientHeaders.ClientType {
+			t.Errorf("x-client-type = %q, want %q", ct, cfg.ClientHeaders.ClientType)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"object":"chat.completion","choices":[{"message":{"role":"assistant","content":"hi","reasoning":"think"}}]}`))
@@ -362,8 +362,8 @@ func TestProxyChatUpstreamError(t *testing.T) {
 func TestFetchFreeModels(t *testing.T) {
 	resetModelsCache()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if ua := r.Header.Get("User-Agent"); ua != defaultUserAgent {
-			t.Errorf("User-Agent = %q, want %q", ua, defaultUserAgent)
+		if ua := r.Header.Get("User-Agent"); ua != cfg.ClientHeaders.UserAgent {
+			t.Errorf("User-Agent = %q, want %q", ua, cfg.ClientHeaders.UserAgent)
 		}
 		_, _ = w.Write(freeModelsBody())
 	}))
@@ -662,5 +662,79 @@ func TestProxyChatStreamingNoBodyPassthrough(t *testing.T) {
 	}
 	if rr.Body.Len() != 0 {
 		t.Fatalf("body = %q, want empty", rr.Body.String())
+	}
+}
+
+// ---- 客户端指纹头 ----
+
+func TestUpstreamClientHeadersDefault(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		want := map[string]string{
+			"http-referer":       defaultClientReferer,
+			"x-title":            defaultClientTitle,
+			"User-Agent":         defaultClientUserAgent,
+			"x-core-version":     defaultClientCoreVersion,
+			"x-platform-version": defaultClientPlatVersion,
+			"x-client-version":   defaultClientClientVer,
+			"x-platform":         defaultClientPlatform,
+			"x-client-type":      defaultClientType,
+		}
+		for k, v := range want {
+			if got := r.Header.Get(k); got != v {
+				t.Errorf("header %s = %q, want %q", k, got, v)
+			}
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	t.Setenv("UPSTREAM_URL", upstream.URL)
+	t.Setenv("CLINE_API_KEY", "")
+	t.Setenv("LOGIN_REQUIRED", "false")
+	rr := callProxy(t, http.MethodPost, "/v1/chat/completions", []byte(`{"stream":false}`), nil)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rr.Code)
+	}
+}
+
+func TestUpstreamClientHeadersOverride(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// CLIENT_HEADERS JSON 覆盖已知头 + 追加自定义头；单项 env 仍生效于未覆盖项
+		if got := r.Header.Get("x-client-type"); got != "cline-cli" {
+			t.Errorf("x-client-type = %q, want cline-cli (CLIENT_HEADERS override)", got)
+		}
+		if got := r.Header.Get("x-custom-trace"); got != "abc" {
+			t.Errorf("x-custom-trace = %q, want abc (extra header)", got)
+		}
+		if got := r.Header.Get("User-Agent"); got != "Cline/9.9.9" {
+			t.Errorf("User-Agent = %q, want Cline/9.9.9 (CLIENT_USER_AGENT env)", got)
+		}
+		// 空字符串表示不发送该头
+		if _, ok := r.Header["X-Platform"]; ok {
+			t.Errorf("x-platform should be omitted when overridden to empty")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	t.Setenv("UPSTREAM_URL", upstream.URL)
+	t.Setenv("CLINE_API_KEY", "")
+	t.Setenv("LOGIN_REQUIRED", "false")
+	t.Setenv("CLIENT_USER_AGENT", "Cline/9.9.9")
+	t.Setenv("CLIENT_HEADERS", `{"x-client-type":"cline-cli","x-platform":"","x-custom-trace":"abc"}`)
+	rr := callProxy(t, http.MethodPost, "/v1/chat/completions", []byte(`{"stream":false}`), nil)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rr.Code)
+	}
+}
+
+func TestLoadClientHeadersInvalidJSON(t *testing.T) {
+	t.Setenv("CLIENT_HEADERS", `{not json`)
+	ch := loadClientHeaders()
+	if ch.ClientType != defaultClientType {
+		t.Errorf("ClientType = %q, want default %q (invalid JSON ignored)", ch.ClientType, defaultClientType)
 	}
 }

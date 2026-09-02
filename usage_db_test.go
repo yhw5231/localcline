@@ -3,6 +3,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,11 +15,27 @@ import (
 
 // TestMain 默认把 USAGE_DB_PATH 置空（内存模式），避免测试在仓库目录落盘
 // 或残留未关闭的 SQLite 连接导致文件锁；需要真实文件的用例用 t.Setenv 覆盖。
+// 同时把 DATA_DIR 指向临时目录并重新加载配置：包 init() 在 TestMain 之前
+// 已经读取过仓库 data/ 下的 accounts.json、token-secret 等本地文件，
+// 不重载会让账号与密钥相关的测试结果随环境漂移。
 func TestMain(m *testing.M) {
 	if os.Getenv("USAGE_DB_PATH") == "" {
 		_ = os.Setenv("USAGE_DB_PATH", "")
 	}
-	os.Exit(m.Run())
+	code := func() int {
+		if os.Getenv("DATA_DIR") == "" {
+			dir, err := os.MkdirTemp("", "cline2api-test-data")
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "create test data dir:", err)
+				os.Exit(1)
+			}
+			_ = os.Setenv("DATA_DIR", dir)
+			defer os.RemoveAll(dir)
+		}
+		reloadConfig()
+		return m.Run()
+	}()
+	os.Exit(code)
 }
 
 func TestUsageDBAppendAndPersist(t *testing.T) {

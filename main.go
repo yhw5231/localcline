@@ -18,6 +18,8 @@
 //	MODELS_UPSTREAM 免费模型上游，默认 https://api.cline.bot/api/v1/ai/cline/recommended-models
 //	CLINE_API_KEY   可选，覆盖透传的 Authorization
 //	PORT            监听端口，默认 8080
+//	CLIENT_*        上游客户端指纹头（CLIENT_USER_AGENT、CLIENT_TYPE 等），
+//	                CLIENT_HEADERS 接受 JSON 对象整体覆盖/追加，见 README
 package main
 
 import (
@@ -41,10 +43,6 @@ import (
 const (
 	defaultUpstream       = "https://api.cline.bot/api/v1/chat/completions"
 	defaultModelsUpstream = "https://api.cline.bot/api/v1/ai/cline/recommended-models"
-
-	// Cline 需要的客户端标识（与官方 CLI 一致）。聊天转发与模型拉取都用同一 UA，
-	// 避免 Go 默认暴露 "Go-http-client/1.1"。
-	defaultUserAgent = "Cline/3.0.38"
 
 	modelsCacheTTL     = 5 * time.Minute  // 免费模型列表成功缓存时长
 	modelsErrorCache   = 30 * time.Second // 上游失败后的负缓存时长（吸收突发请求）
@@ -648,8 +646,9 @@ func fetchModelsUpstream(upstream string) (*ModelsList, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Cline 推荐模型端点无需鉴权；带 UA 与官方客户端一致
-	req.Header.Set("User-Agent", defaultUserAgent)
+	// Cline 推荐模型端点无需鉴权；客户端指纹头与聊天转发保持一致（含 User-Agent，
+	// 避免 Go 默认暴露 "Go-http-client/1.1"）
+	applyClientHeaders(req.Header)
 
 	resp, err := client.Do(req)
 	if err != nil {

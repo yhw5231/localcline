@@ -1,4 +1,4 @@
-# cline2api-go
+﻿# cline2api-go
 
 [Cline](https://cline.bot) API 反向代理的 **Go 移植版**：行为与原版 [Cloudflare Worker](https://github.com/6Kmfi6HP/cline2api)（`src/index.js`）保持一致，并在此基础上扩展了**登录验证、多上游 key、按模型限流冷却、HTTP/SOCKS 代理与代理池**。
 
@@ -45,6 +45,29 @@ SOCKS_PORT=1080 \
 | `CLINE_API_KEY` | 空 | 单个 Cline API Key；`UPSTREAM_KEYS` 未设置时的单 key 回退 |
 | `PORT` | `8080` | API 监听端口 |
 
+### 客户端指纹头
+
+转发到上游时默认携带与官方 Cline VSCode 客户端一致的指纹头（`Authorization`、`Content-Type: application/json` 由服务单独注入，不在此列）。每项都可用独立环境变量修改；设为空字符串则不发送该头：
+
+| 变量 | 默认值 | 对应请求头 |
+| --- | --- | --- |
+| `CLIENT_HTTP_REFERER` | `https://cline.bot` | `http-referer` |
+| `CLIENT_TITLE` | `Cline` | `x-title` |
+| `CLIENT_USER_AGENT` | `Cline/4.1.16` | `User-Agent` |
+| `CLIENT_CORE_VERSION` | `4.1.16` | `x-core-version` |
+| `CLIENT_PLATFORM_VERSION` | `1.106.0` | `x-platform-version` |
+| `CLIENT_CLIENT_VERSION` | `4.1.16` | `x-client-version` |
+| `CLIENT_PLATFORM` | `vscode` | `x-platform` |
+| `CLIENT_TYPE` | `cline-vscode` | `x-client-type` |
+
+`CLIENT_HEADERS` 接受一个 JSON 对象，可覆盖上表任意头（键名大小写不敏感，值为空表示不发送），并支持追加表中没有的自定义头：
+
+```bash
+CLIENT_HEADERS='{"x-client-type":"cline-cli","user-agent":"Cline/4.2.0","x-my-header":"abc"}'
+```
+
+聊天转发与免费模型拉取共用这套指纹头。
+
 ### 登录验证
 
 | 变量 | 默认值 | 说明 |
@@ -54,7 +77,10 @@ SOCKS_PORT=1080 \
 | `ADMIN_PASSWORD` | `admin` | 管理员密码 |
 | `EXTRA_USERS` | 空 | 额外用户，逗号分隔 `user:pass` |
 | `TOKEN_TTL` | `24h` | 登录 token 有效期（Go duration，如 `30m`） |
-| `TOKEN_SECRET` | 随机（进程内） | token 签名密钥；建议生产固定 |
+| `DATA_DIR` | `data` | Persistent data root; `/data` in the container image |
+| `ACCOUNTS_PATH` | `${DATA_DIR}/accounts.json` | Persistent account configuration file |
+| `TOKEN_SECRET` | empty | Explicit token signing secret; takes precedence over the persistent secret file |
+| `TOKEN_SECRET_PATH` | `${DATA_DIR}/token-secret` | Persistent signing-secret file created automatically when `TOKEN_SECRET` is unset |
 
 ### 多上游 key 与冷却
 

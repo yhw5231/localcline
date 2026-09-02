@@ -91,6 +91,9 @@ func secret() string {
 	if s := getenv("TOKEN_SECRET", ""); s != "" {
 		return s
 	}
+	if s, err := loadOrCreateTokenSecret(cfg.TokenSecretPath); err == nil {
+		return s
+	}
 	return defaultTokenSecret
 }
 

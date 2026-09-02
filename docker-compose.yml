@@ -1,0 +1,19 @@
+services:
+  cline2api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cline2api:local
+    container_name: cline2api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      DATA_DIR: /data
+      # 客户端指纹头（默认与官方 Cline VSCode 客户端一致，按需覆盖；设空则不发送该头）
+      # CLIENT_USER_AGENT: Cline/4.1.16
+      # CLIENT_TYPE: cline-vscode
+      # CLIENT_HEADERS: '{"x-client-type":"cline-cli","x-my-header":"abc"}'
+    volumes:
+      - ./data:/data

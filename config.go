@@ -4,11 +4,89 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
+	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// 客户端指纹头默认值：与官方 Cline VSCode 客户端一致。
+const (
+	defaultClientReferer     = "https://cline.bot"
+	defaultClientTitle       = "Cline"
+	defaultClientUserAgent   = "Cline/4.1.16"
+	defaultClientCoreVersion = "4.1.16"
+	defaultClientPlatVersion = "1.106.0"
+	defaultClientClientVer   = "4.1.16"
+	defaultClientPlatform    = "vscode"
+	defaultClientType        = "cline-vscode"
+)
+
+// ClientHeaders 上游请求携带的客户端指纹头（Content-Type / Authorization 之外的部分）。
+// 每项可通过独立环境变量覆盖，另可用 CLIENT_HEADERS（JSON 对象）覆盖单项或追加额外头。
+type ClientHeaders struct {
+	HTTPReferer     string
+	Title           string
+	UserAgent       string
+	CoreVersion     string
+	PlatformVersion string
+	ClientVersion   string
+	Platform        string
+	ClientType      string
+	Extra           map[string]string // CLIENT_HEADERS 中无法映射到已知头名的额外自定义头
+}
+
+// applyOverrides 用 JSON 对象覆盖指纹头：键名（大小写不敏感）匹配已知头时替换
+// 对应字段，空字符串表示不发送该头；其余键原样保留为额外自定义头。
+func (ch *ClientHeaders) applyOverrides(custom map[string]string) {
+	known := map[string]*string{
+		"http-referer":       &ch.HTTPReferer,
+		"x-title":            &ch.Title,
+		"user-agent":         &ch.UserAgent,
+		"x-core-version":     &ch.CoreVersion,
+		"x-platform-version": &ch.PlatformVersion,
+		"x-client-version":   &ch.ClientVersion,
+		"x-platform":         &ch.Platform,
+		"x-client-type":      &ch.ClientType,
+	}
+	ch.Extra = nil
+	for name, value := range custom {
+		if field, ok := known[strings.ToLower(name)]; ok {
+			*field = value
+			continue
+		}
+		if ch.Extra == nil {
+			ch.Extra = map[string]string{}
+		}
+		ch.Extra[name] = value
+	}
+}
+
+// loadClientHeaders 组装客户端指纹头：默认值 ← 单项环境变量 ← CLIENT_HEADERS JSON。
+func loadClientHeaders() ClientHeaders {
+	ch := ClientHeaders{
+		HTTPReferer:     getenv("CLIENT_HTTP_REFERER", defaultClientReferer),
+		Title:           getenv("CLIENT_TITLE", defaultClientTitle),
+		UserAgent:       getenv("CLIENT_USER_AGENT", defaultClientUserAgent),
+		CoreVersion:     getenv("CLIENT_CORE_VERSION", defaultClientCoreVersion),
+		PlatformVersion: getenv("CLIENT_PLATFORM_VERSION", defaultClientPlatVersion),
+		ClientVersion:   getenv("CLIENT_CLIENT_VERSION", defaultClientClientVer),
+		Platform:        getenv("CLIENT_PLATFORM", defaultClientPlatform),
+		ClientType:      getenv("CLIENT_TYPE", defaultClientType),
+	}
+	if raw := getenv("CLIENT_HEADERS", ""); raw != "" {
+		var custom map[string]string
+		if err := json.Unmarshal([]byte(raw), &custom); err != nil {
+			log.Printf("warning: CLIENT_HEADERS is not a valid JSON object, ignored: %v", err)
+		} else {
+			ch.applyOverrides(custom)
+		}
+	}
+	return ch
+}
 
 // PoolEntry：代理池中的一条代理。
 // User/Pass 是该代理的凭证（单端口模式下凭 Proxy-Authorization 区分不同代理）；
@@ -28,12 +106,18 @@ type Config struct {
 	UpstreamURL    string
 	ModelsUpstream string
 
+	// 上游请求的客户端指纹头
+	ClientHeaders ClientHeaders
+
 	// 登录验证
-	LoginRequired bool
-	AdminUser     string
-	AdminPass     string
-	ExtraUsers    map[string]string
-	TokenTTL      time.Duration
+	LoginRequired   bool
+	AdminUser       string
+	AdminPass       string
+	ExtraUsers      map[string]string
+	TokenTTL        time.Duration
+	DataDir         string
+	AccountsPath    string
+	TokenSecretPath string
 
 	// 多上游 key
 	UpstreamKeys      []string
@@ -60,10 +144,10 @@ type Config struct {
 	PoolEntries    []PoolEntry
 
 	// 可观察性
-	ReqLogSize        int // 请求记录环形缓冲容量
-	UsageDBPath       string
+	ReqLogSize         int // 请求记录环形缓冲容量
+	UsageDBPath        string
 	UsageRetentionDays int
-	UsageMaxRecords   int
+	UsageMaxRecords    int
 }
 
 // defaultTokenSecret 在进程内保持稳定（restart 后失效），避免每次 reloadConfig 都换密钥
@@ -99,7 +183,27 @@ func getenv(key, def string) string {
 
 // loadConfig 从环境变量读取配置。
 func loadConfig() Config {
+	dataDir := getenv("DATA_DIR", "data")
+	accountsPath := getenv("ACCOUNTS_PATH", filepath.Join(dataDir, "accounts.json"))
+	tokenSecretPath := getenv("TOKEN_SECRET_PATH", filepath.Join(dataDir, "token-secret"))
+	usageDBPath := getenv("USAGE_DB_PATH", filepath.Join(dataDir, "usage.db"))
+
+	persisted, _ := loadPersistedAccounts(accountsPath)
+	adminUser := persisted.AdminUsername
+	if adminUser == "" {
+		adminUser = "admin"
+	}
+	adminPass := persisted.AdminPassword
+	if adminPass == "" {
+		adminPass = "admin"
+	}
+	adminUser = getenv("ADMIN_USERNAME", adminUser)
+	adminPass = getenv("ADMIN_PASSWORD", adminPass)
+
 	extra := map[string]string{}
+	for user, password := range persisted.ExtraUsers {
+		extra[user] = password
+	}
 	for _, pair := range splitCSV(getenv("EXTRA_USERS", "")) {
 		if u, p, ok := cutPair(pair); ok {
 			extra[u] = p
@@ -123,33 +227,37 @@ func loadConfig() Config {
 	}
 
 	return Config{
-		Port:              getenv("PORT", defaultPort),
-		UpstreamURL:       getenv("UPSTREAM_URL", defaultUpstream),
-		ModelsUpstream:    getenv("MODELS_UPSTREAM", defaultModelsUpstream),
-		LoginRequired:     loginReq,
-		AdminUser:         getenv("ADMIN_USERNAME", "admin"),
-		AdminPass:         getenv("ADMIN_PASSWORD", "admin"),
-		ExtraUsers:        extra,
-		TokenTTL:          durationEnv("TOKEN_TTL", 24*time.Hour),
-		UpstreamKeys:      keys,
-		KeySelectMode:     mode,
-		RateLimitCooldown: cooldown,
-		MaxKeyTries:       maxTries,
-		ProxyPort:         getenv("PROXY_PORT", ""),
-		ProxyUser:         getenv("PROXY_USER", ""),
-		ProxyPass:         getenv("PROXY_PASS", ""),
-		SocksPort:         getenv("SOCKS_PORT", ""),
-		SocksUser:         getenv("SOCKS_USER", ""),
-		SocksPass:         getenv("SOCKS_PASS", ""),
-		ProxyManagedAll:   managedAll,
-		PoolPort:          intEnv("PROXY_POOL_PORT", 0),
-		PoolRangeStart:    rangeStart,
-		PoolRangeEnd:      rangeEnd,
-		PoolEntries:       parsePoolEntries(getenv("PROXY_POOL_ENTRIES", "")),
-		ReqLogSize:        intEnv("REQ_LOG_SIZE", 1000),
-		UsageDBPath:       getenv("USAGE_DB_PATH", "data/usage.db"),
+		Port:               getenv("PORT", defaultPort),
+		UpstreamURL:        getenv("UPSTREAM_URL", defaultUpstream),
+		ModelsUpstream:     getenv("MODELS_UPSTREAM", defaultModelsUpstream),
+		ClientHeaders:      loadClientHeaders(),
+		LoginRequired:      loginReq,
+		AdminUser:          adminUser,
+		AdminPass:          adminPass,
+		ExtraUsers:         extra,
+		TokenTTL:           durationEnv("TOKEN_TTL", 24*time.Hour),
+		DataDir:            dataDir,
+		AccountsPath:       accountsPath,
+		TokenSecretPath:    tokenSecretPath,
+		UpstreamKeys:       keys,
+		KeySelectMode:      mode,
+		RateLimitCooldown:  cooldown,
+		MaxKeyTries:        maxTries,
+		ProxyPort:          getenv("PROXY_PORT", ""),
+		ProxyUser:          getenv("PROXY_USER", ""),
+		ProxyPass:          getenv("PROXY_PASS", ""),
+		SocksPort:          getenv("SOCKS_PORT", ""),
+		SocksUser:          getenv("SOCKS_USER", ""),
+		SocksPass:          getenv("SOCKS_PASS", ""),
+		ProxyManagedAll:    managedAll,
+		PoolPort:           intEnv("PROXY_POOL_PORT", 0),
+		PoolRangeStart:     rangeStart,
+		PoolRangeEnd:       rangeEnd,
+		PoolEntries:        parsePoolEntries(getenv("PROXY_POOL_ENTRIES", "")),
+		ReqLogSize:         intEnv("REQ_LOG_SIZE", 1000),
+		UsageDBPath:        usageDBPath,
 		UsageRetentionDays: intEnv("USAGE_RETENTION_DAYS", 30),
-		UsageMaxRecords:   intEnv("USAGE_MAX_RECORDS", 100000),
+		UsageMaxRecords:    intEnv("USAGE_MAX_RECORDS", 100000),
 	}
 }
 

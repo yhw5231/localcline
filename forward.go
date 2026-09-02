@@ -24,6 +24,34 @@ func extractModel(raw []byte) string {
 	return parsed.Model
 }
 
+// applyClientHeaders 把配置的客户端指纹头写入请求头（默认模拟官方 Cline VSCode 客户端）。
+// 头名按配置原样发送，不经 Go 的 canonical 化；User-Agent 例外：Go 只认 canonical 键，
+// 直接写小写键会被忽略并回退发送默认的 "Go-http-client/1.1"。空值跳过不发送。
+func applyClientHeaders(h http.Header) {
+	ch := cfg.ClientHeaders
+	set := func(name, value string) {
+		if value == "" {
+			return
+		}
+		if strings.EqualFold(name, "User-Agent") {
+			h.Set("User-Agent", value)
+			return
+		}
+		h[name] = []string{value}
+	}
+	set("http-referer", ch.HTTPReferer)
+	set("x-title", ch.Title)
+	set("user-agent", ch.UserAgent)
+	set("x-core-version", ch.CoreVersion)
+	set("x-platform-version", ch.PlatformVersion)
+	set("x-client-version", ch.ClientVersion)
+	set("x-platform", ch.Platform)
+	set("x-client-type", ch.ClientType)
+	for name, value := range ch.Extra {
+		set(name, value)
+	}
+}
+
 // doUpstream 构造并发送上游请求（post + JSON body）。
 func doUpstream(upstream string, rawBody []byte, auth string, extra func(*http.Request)) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodPost, upstream, bytes.NewReader(rawBody))
@@ -34,9 +62,8 @@ func doUpstream(upstream string, rawBody []byte, auth string, extra func(*http.R
 	if auth != "" {
 		req.Header.Set("Authorization", auth)
 	}
-	// Cline 需要的客户端标识
-	req.Header.Set("x-client-type", "cline-cli")
-	req.Header.Set("User-Agent", defaultUserAgent)
+	// 客户端指纹头（http-referer / x-platform / x-client-type 等），环境变量可改
+	applyClientHeaders(req.Header)
 	if extra != nil {
 		extra(req)
 	}
