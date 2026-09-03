@@ -21,7 +21,8 @@ reasoning_content` 改写（现改为**渠道级开关**）、请求日志与用
   - `固定代理`：`http(s)://user:pass@host:port` 或 `socks5://...`
   - `IPv6 代理池`：对接 ipv6-proxy-pool（详见下文），支持自动申请/绑定/释放/换 IP
 - **下游通用 key**：`sk-gw-...`，客户端用它调用本网关；启用/停用即生效。
-- **故障转移**：单请求内自动换下一个 key/渠道；按 (key, model) 冷却跳过故障 key。
+- **故障转移**：单请求内自动换下一个 key/渠道；按渠道冷却粒度（默认按 key，可选按
+  (key, model)）跳过故障 key。
 - **reasoning 改写**（渠道可选）：把上游 `reasoning` 复制为 `reasoning_content`，
   流式/非流式都支持（Cline 渠道需要，供 sub2api 等下游识别 thinking）。
 - **请求日志**：最近 N 条请求（环形缓冲），含渠道/key/模型/状态/耗时/错误。
@@ -62,6 +63,190 @@ curl http://localhost:8080/v1/chat/completions \
 ```
 
 `GET /v1/models` 聚合所有启用渠道的模型列表（静态列表 ∪ models 端点拉取，去重）。
+
+## 部署说明
+
+### 方式一：Docker Compose（推荐）
+
+前置要求：Docker 20.10+ 与 Docker Compose v2（`docker compose version` 可验证）。
+
+```bash
+# 1. 克隆代码
+git clone https://github.com/yhw5231/localcline.git
+cd localcline
+
+# 2.（可选）按需编辑 docker-compose.yml：端口映射、环境变量
+
+# 3. 构建并启动（首次构建需下载 Go 依赖，约 1~3 分钟）
+docker compose up -d --build
+
+# 4. 查看日志确认启动成功
+docker compose logs -f
+# 出现 "unigate listening on :8080" 即正常，Ctrl+C 退出跟踪
+```
+
+启动后浏览器打开 `http://<主机IP>:8080`，默认账号 `admin` / `admin`，
+**生产环境务必通过环境变量修改管理员账号密码**（见下文安全清单）。
+
+常用运维命令：
+
+```bash
+docker compose restart          # 重启
+docker compose down             # 停止（data/ 目录保留）
+docker compose up -d --build    # 升级：拉新代码后重新构建
+docker compose logs -f --tail=100
+```
+
+### 方式二：纯 Docker（不用 Compose）
+
+```bash
+docker build -t unigate:local .
+mkdir -p ./data
+
+docker run -d --name unigate \
+  --restart unless-stopped \
+  -p 8080:8080 \
+  -v "$(pwd)/data:/data" \
+  -e ADMIN_USERNAME=admin \
+  -e ADMIN_PASSWORD=改成强密码 \
+  unigate:local
+```
+
+> 说明：镜像基于 alpine，以非 root 用户 `app` 运行；宿主机 `./data` 目录需可写
+> （Windows/挂载 NAS 时若遇权限问题，可 `chmod 777 data` 或调整目录属主）。
+
+### 方式三：源码编译部署
+
+前置要求：Go 1.26+（仅编译期需要，无需 CGO 与 gcc）。
+
+```bash
+# 编译（WebUI 已通过 go:embed 嵌入二进制，产物单文件即可运行）
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o unigate .
+
+# 前台运行
+DATA_DIR=./data ./unigate
+
+# 或安装为 systemd 服务（Linux）
+sudo useradd -r -s /usr/sbin/nologin unigate 2>/dev/null || true
+sudo mkdir -p /opt/unigate && sudo cp unigate /opt/unigate/
+sudo chown -R unigate:unigate /opt/unigate
+
+sudo tee /etc/systemd/system/unigate.service <<'EOF'
+[Unit]
+Description=UniGate AI Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=unigate
+WorkingDirectory=/opt/unigate
+ExecStart=/opt/unigate/unigate
+Environment=PORT=8080
+Environment=DATA_DIR=/opt/unigate/data
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload && sudo systemctl enable --now unigate
+sudo systemctl status unigate        # 查看状态
+journalctl -u unigate -f             # 跟踪日志
+```
+
+### 数据目录与持久化
+
+所有状态集中在一个目录（容器内 `/data`，本地默认 `./data`），**部署时必须持久化
+该目录**，否则重启后渠道配置、密钥、用量全部丢失：
+
+| 文件 | 内容 |
+| --- | --- |
+| `gateway.json` | 渠道、上游 key 与代理配置、下游通用 key（WebUI 管理，原子写入） |
+| `accounts.json` | 管理员与额外用户账号的持久化文件（可选；启动时读取，环境变量优先级更高，手动编辑可固定账号） |
+| `token-secret` | 登录 token 签名密钥（首次启动自动生成；固定后重启不影响已登录状态） |
+| `usage.db` | 用量统计 SQLite 数据库 |
+| `lease-assignments.json` | 代理池「key→租约」分配表（保证重启后一号一 IP 不变） |
+
+备份即备份该目录；迁移到新机器：停服 → 拷贝整个目录 → 启动，配置自动加载。
+自定义路径可用 `DATA_DIR` 与 `GATEWAY_CONFIG_PATH` 等环境变量（见下文配置表）。
+
+### 反向代理与 HTTPS
+
+网关本身只提供 HTTP，生产环境建议套 Nginx / Caddy 提供 TLS。SSE 流式响应需关闭缓冲：
+
+Nginx：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_buffering off;        # SSE 流式必需
+    proxy_cache off;
+    proxy_read_timeout 600s;    # LLM 长响应
+}
+```
+
+Caddy（自动 HTTPS）：
+
+```
+gw.example.com {
+    reverse_proxy 127.0.0.1:8080 {
+        flush_interval -1       # SSE 流式必需
+    }
+}
+```
+
+### 验证与健康检查
+
+```bash
+# 模型列表（GW_KEY_AUTH=true 时需带下游通用 key）
+curl http://127.0.0.1:8080/v1/models -H "Authorization: Bearer sk-gw-xxxx"
+
+# 未配渠道时也可先登录验证服务可用（返回 token）
+curl -X POST http://127.0.0.1:8080/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin"}'
+
+# 对话转发冒烟测试
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer sk-gw-xxxx" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"ping"}]}'
+```
+
+容器可加健康检查（compose）：
+
+```yaml
+healthcheck:
+  test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
+  interval: 30s
+  timeout: 5s
+  retries: 3
+```
+
+### 安全清单（生产部署必读）
+
+- **修改默认管理员密码**：通过 `ADMIN_USERNAME`/`ADMIN_PASSWORD` 环境变量设置（或手动编辑 `data/accounts.json`）；
+- **保持 `GW_KEY_AUTH=true`**（默认）：否则 `/v1/*` 完全开放，任何能访问端口的人都能消耗你的上游额度；
+- **收紧网络暴露**：仅本机使用时把端口映射改为 `127.0.0.1:8080:8080`，公网部署务必套反代 + HTTPS + 防火墙白名单；
+- **使用强下游 key**：WebUI 生成的 `sk-gw-...` 即为凭证，泄露后可停用再换发；
+- **`EXTRA_USERS` 仅用于预留多用户登录**：额外用户可登录换取 token，但 WebUI 数据均经
+  Admin API 拉取（仅主管理员可见），额外用户目前登录后看不到内容；
+- 上游 key、代理凭证均明文存于 `gateway.json`，请确保数据目录权限（`chmod 600` 各文件或目录 `700`）。
+
+### 升级
+
+```bash
+git pull
+docker compose up -d --build     # Compose 部署
+# 或源码部署：重新 go build 后重启服务
+```
+
+- 数据格式向后兼容：旧 `gateway.json` / `usage.db` 会自动迁移（如用量库自动补
+  `channel` 列），升级前照常保留 `data/` 即可；保险起见升级前备份一份。
+- 破坏性变更仅存在于 cline2api → UniGate 那一次（见文末差异说明），此后均为常规升级。
 
 ## IPv6 代理池集成（ipv6-proxy-pool）
 
@@ -104,7 +289,9 @@ curl http://localhost:8080/v1/chat/completions \
 | 网络/代理错误 | `NET_ERR_COOLDOWN` | 15s |
 | 全部候选失败 | 有 429 记录则返回 429 + `Retry-After`，否则 502 | |
 
-冷却按 `(key, model)` 独立记录——同一账号不同模型的额度互不影响。
+冷却粒度按渠道配置（`cooldown_scope`）：默认**按 key 跨模型共享**——某模型故障即冷停
+该 key 的全部模型（适合 key 配额共享的上游）；渠道可选 `key_model` 按 `(key, model)`
+独立记录——同一账号不同模型的额度互不影响。
 
 ## 配置项（环境变量）
 
@@ -114,8 +301,8 @@ curl http://localhost:8080/v1/chat/completions \
 | `DATA_DIR` | `data`（容器内 `/data`） | 数据目录，**容器部署必须挂载** |
 | `GATEWAY_CONFIG_PATH` | `${DATA_DIR}/gateway.json` | 渠道/密钥配置文件（WebUI 管理） |
 | `LEASE_ASSIGN_PATH` | `${DATA_DIR}/lease-assignments.json` | 代理池「key→租约」分配表（跨渠道复用，持久化保证 IP 稳定） |
-| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / `admin` | WebUI 管理员（也持久化于 accounts.json） |
-| `EXTRA_USERS` | 空 | 额外 WebUI 用户，`user:pass,user2:pass2` |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / `admin` | WebUI 管理员账号；Admin API 仅此账号可用 |
+| `EXTRA_USERS` | 空 | 额外 WebUI 登录用户，`user:pass,user2:pass2`（仅登录 WebUI，无 Admin API 权限） |
 | `TOKEN_TTL` | `24h` | 登录 token 有效期 |
 | `TOKEN_SECRET` | 空 | 登录 token 签名密钥（缺省自动持久化到 data/token-secret） |
 | `GW_KEY_AUTH` | `true` | 下游是否必须携带通用 key |
