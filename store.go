@@ -87,6 +87,7 @@ type Channel struct {
 	Name          string            `json:"name"`
 	Group         string            `json:"group,omitempty"`          // 自定义分组标签（仅用于 WebUI 归类/过滤，空为未分组）
 	BaseURL       string            `json:"base_url"`                 // 如 https://api.cline.bot/api/v1
+	EndpointType  string            `json:"endpoint_type,omitempty"`  // 上游对话端点类型："chat"（默认，/chat/completions）；"responses"（OpenAI Responses API /responses）
 	ModelsURL     string            `json:"models_url,omitempty"`     // 模型列表端点；默认 BaseURL + /models
 	Models        []string          `json:"models,omitempty"`         // 静态模型列表（用于 /v1/models 聚合与路由过滤）
 	Headers       map[string]string `json:"headers,omitempty"`        // 渠道级自定义请求头
@@ -94,6 +95,24 @@ type Channel struct {
 	CooldownScope string            `json:"cooldown_scope,omitempty"` // 冷却粒度："" / "key" 按 key 跨模型共享（默认）；"key_model" 按 (key,model)
 	Enabled       bool              `json:"enabled"`
 	Keys          []*UpKey          `json:"keys"`
+}
+
+// endpointChat / endpointResponses 渠道对话端点类型。
+const (
+	endpointChat      = "chat"
+	endpointResponses = "responses"
+)
+
+// normalizeEndpointType 归一化端点类型（"" 视为默认 chat）。
+func normalizeEndpointType(t string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(t)) {
+	case "", "chat", "chat_completions", "chat-completions", "chat/completions":
+		return endpointChat, nil
+	case "responses", "response", "openai_responses", "openai/responses":
+		return endpointResponses, nil
+	default:
+		return "", fmt.Errorf("unsupported endpoint_type %q (want \"chat\" / \"responses\")", t)
+	}
 }
 
 // cooldownScopeKeyModel 冷却粒度：按 (key, model) 独立冷却（显式选择时使用）。
@@ -121,6 +140,56 @@ func (c *Channel) chatURL() string {
 		return base
 	}
 	return base + "/chat/completions"
+}
+
+// responsesURL 返回该渠道的 OpenAI Responses API 端点（/v1/responses）。
+func (c *Channel) responsesURL() string {
+	return responsesURLOf(strings.TrimRight(strings.TrimSpace(c.BaseURL), "/"))
+}
+
+// responsesURLOf 在给定 base 上推导 Responses API 端点。
+func responsesURLOf(base string) string {
+	if base == "" {
+		return ""
+	}
+	// 已指到 /responses 端点则直接使用
+	if strings.HasSuffix(base, "/responses") {
+		return base
+	}
+	// base 末段已是版本号（如 /v1、/api/v2）时直接在其下挂 /responses，
+	// 否则补一段 /v1（OpenAI 官方为 /v1/responses）
+	if last := lastSeg(base); len(last) > 1 && last[0] == 'v' && isAllDigits(last[1:]) {
+		return base + "/responses"
+	}
+	return base + "/v1/responses"
+}
+
+// lastSeg 返回 URL path 的最后一段（不含前导 /）。
+func lastSeg(s string) string {
+	if i := strings.LastIndex(s, "/"); i >= 0 {
+		return s[i+1:]
+	}
+	return s
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// endpointURL 按渠道端点类型返回对话端点。
+func (c *Channel) endpointURL() string {
+	if c.EndpointType == endpointResponses {
+		return c.responsesURL()
+	}
+	return c.chatURL()
 }
 
 // modelsURL 返回该渠道的模型列表端点。
@@ -292,6 +361,11 @@ func normalizeChannel(ch *Channel) error {
 	if ch.BaseURL == "" {
 		return errors.New("channel base_url required")
 	}
+	et, err := normalizeEndpointType(ch.EndpointType)
+	if err != nil {
+		return err
+	}
+	ch.EndpointType = et
 	scope, err := normalizeCooldownScope(ch.CooldownScope)
 	if err != nil {
 		return err

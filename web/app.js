@@ -154,6 +154,7 @@ function renderChannels() {
         <span class="name">${esc(ch.name)}</span>
         ${ch.group ? `<span class="badge group">${esc(ch.group)}</span>` : ""}
         <span class="muted">${esc(ch.base_url)}</span>
+        ${ch.endpoint_type === "responses" ? '<span class="badge info">responses</span>' : ""}
         ${ch.rewrite_reasoning ? '<span class="badge info">reasoning改写</span>' : ""}
         ${ch.cooldown_scope === "key_model" ? '<span class="badge info">按(Key,模型)冷却</span>' : ""}
         <span class="spacer"></span>
@@ -196,7 +197,7 @@ function proxyDesc(p) {
 
 // ---- 渠道编辑器 ----
 $("#addChannelBtn").addEventListener("click", () => openChannelEditor({
-  id: "", name: "", group: "", base_url: "", models_url: "", models: [], headers: {},
+  id: "", name: "", group: "", base_url: "", models_url: "", endpoint_type: "chat", models: [], headers: {},
   rewrite_reasoning: false, cooldown_scope: "key", enabled: true, keys: [],
 }));
 
@@ -207,6 +208,7 @@ function openChannelEditor(ch) {
   $("#chGroup").value = ch.group || "";
   $("#chBaseURL").value = ch.base_url || "";
   $("#chModelsURL").value = ch.models_url || "";
+  $("#chEndpointType").value = ch.endpoint_type || "chat";
   $("#chModels").value = (ch.models || []).join("\n");
   $("#chEnabled").checked = !!ch.enabled;
   $("#chRewrite").checked = !!ch.rewrite_reasoning;
@@ -225,9 +227,9 @@ function renderModelChips() {
   const models = $("#chModels").value.split("\n").map((s) => s.trim()).filter(Boolean);
   el.innerHTML = models.map((m) =>
     `<span class="chip">${esc(m)}${freeModelSet.has(m) ? '<i class="badge free">免费</i>' : ""}</span>`
-  ).join("");
+  ).join("") || '<span class="muted" style="font-size:12px">（暂无模型：可手工填写，或保存后点「从上游拉取模型列表」）</span>';
 }
-$("#chModels").addEventListener("input", () => { renderModelChips(); });
+$("#chModels").addEventListener("input", () => { renderModelChips(); freeModelSet = new Set(); });
 
 $$('[data-close="channelModal"]').forEach((b) => b.addEventListener("click", () => $("#channelModal").classList.add("hidden")));
 
@@ -294,6 +296,7 @@ function keyBlock(k) {
         </div>
         <div class="row" style="margin:4px 0">
           <label class="inline"><input type="checkbox" class="kb-persist" ${k.proxy && k.proxy.persistent ? "checked" : ""}> 常驻租约（免空闲回收）</label>
+          <label class="inline" title="同「池+BaseURL」分组的 key 共用同一租约/IP"><input type="checkbox" class="kb-share" ${k.proxy && k.proxy.share ? "checked" : ""}> 跨渠道复用</label>
           <label class="inline"><input type="checkbox" class="kb-rotnet" ${k.proxy && k.proxy.rotate_on_net_err ? "checked" : ""}> 网络失败自动换IP</label>
           <label class="inline">每 N 秒换IP（0=关闭）<input class="kb-rotsec" type="number" min="0" value="${(k.proxy && k.proxy.rotate_interval_sec) || 0}" style="width:90px"></label>
         </div>
@@ -342,21 +345,57 @@ function keyBlock(k) {
 }
 $("#addKeyBtn").addEventListener("click", () => $("#chKeys").appendChild(keyBlock({ name: "", api_key: "", enabled: true })));
 
-// 从上游拉取模型列表（用渠道 key 鉴权），填充可用模型并临时标注免费模型
+// ---- key 批量导入：每行一个，支持 "key" 或 "名称|key"（也兼容 "名称:key"），# 开头为注释 ----
+const BULK_NAME = "导入key";
+$("#toggleBulkBtn").addEventListener("click", () => {
+  const box = $("#bulkImportBox");
+  box.classList.toggle("hidden");
+  if (!box.classList.contains("hidden")) $("#bulkKeysInput").focus();
+});
+$("#bulkImportBtn").addEventListener("click", () => {
+  const lines = $("#bulkKeysInput").value.split("\n").map((s) => s.trim()).filter(Boolean);
+  let imported = 0;
+  for (const line of lines) {
+    if (line.startsWith("#")) continue;
+    let name = "", key = line;
+    // 用分隔符切分名称与 key（允许分隔符两侧空白；key 本身不含 | 或 :）
+    const m = line.match(/^(.+?)\s*[|:]\s*(\S+)$/);
+    if (m) { name = m[1].trim(); key = m[2].trim(); }
+    if (!key) continue;
+    $("#chKeys").appendChild(keyBlock({
+      name: name || `${BULK_NAME}${imported + 1}`,
+      api_key: key,
+      enabled: true,
+    }));
+    imported++;
+  }
+  if (!imported) { toast("没有可导入的 key（每行一个，# 开头为注释）", true); return; }
+  $("#bulkKeysInput").value = "";
+  $("#bulkImportBox").classList.add("hidden");
+  toast(`已导入 ${imported} 个 key，请点「保存」写入配置`);
+});
+
+// 从上游拉取模型列表（用渠道 key 鉴权），与已填模型合并去重后回填，临时标注免费模型
 $("#fetchModelsBtn").addEventListener("click", async () => {
   if (!editChannel.id) { toast("请先保存渠道（生成 key 后）再拉取模型列表", true); return; }
   const btn = $("#fetchModelsBtn");
   btn.disabled = true;
   btn.textContent = "拉取中…";
+  $("#channelErr").textContent = "";
   try {
     const r = await api("POST", `/admin/api/channels/${encodeURIComponent(editChannel.id)}/fetch-models`, {});
-    $("#chModels").value = (r.models || []).join("\n");
+    const fetched = r.models || [];
+    const existing = $("#chModels").value.split("\n").map((s) => s.trim()).filter(Boolean);
+    const merged = [...new Set([...existing, ...fetched])]; // 保留手工已填项（fetch-models 合并模式也保留渠道配置）
+    $("#chModels").value = merged.join("\n");
     freeModelSet = new Set(r.free_models || []);
     renderModelChips();
     const nFree = (r.free_models || []).length;
-    toast(`已拉取 ${r.total} 个模型（key: ${r.key_used || "?"}）${nFree ? `，免费 ${nFree} 个` : ""}`);
+    toast(`已拉取 ${fetched.length} 个模型（key: ${r.key_used || "?"}）${nFree ? `，免费 ${nFree} 个` : ""}，合计 ${merged.length} 个，记得点「保存」`);
   } catch (e) {
-    toast(e.message, true);
+    // 错误同时写入弹窗底部常驻显示（toast 会自动消失）
+    $("#channelErr").textContent = "拉取失败: " + e.message;
+    toast("拉取失败: " + e.message, true);
   } finally {
     btn.disabled = false;
     btn.textContent = "⤓ 从上游拉取模型列表";
@@ -408,6 +447,7 @@ $("#channelSaveBtn").addEventListener("click", async () => {
     group: $("#chGroup").value.trim(),
     base_url: $("#chBaseURL").value.trim(),
     models_url: $("#chModelsURL").value.trim(),
+    endpoint_type: $("#chEndpointType").value,
     models,
     headers,
     rewrite_reasoning: $("#chRewrite").checked,

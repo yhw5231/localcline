@@ -46,6 +46,32 @@ func TestParseModelsPayloadInvalid(t *testing.T) {
 	}
 }
 
+// 非标准 /models 响应形态的兼容：裸数组对象、裸字符串数组、name/model 回退
+func TestParseModelsPayloadAlternateShapes(t *testing.T) {
+	// 裸对象数组（无 data 包装）
+	models, _, err := parseModelsPayload([]byte(`[{"id":"a"},{"name":"n1"},{"model":"m1"},{}]`))
+	if err != nil {
+		t.Fatalf("bare object array: %v", err)
+	}
+	if strings.Join(models, ",") != "a,n1,m1" {
+		t.Fatalf("bare object array models: %v", models)
+	}
+	// 裸字符串数组
+	models, _, err = parseModelsPayload([]byte(`["x","y"]`))
+	if err != nil || strings.Join(models, ",") != "x,y" {
+		t.Fatalf("bare string array: %v %v", models, err)
+	}
+	// id 为数字（部分上游）应跳过而非报错
+	models, _, err = parseModelsPayload([]byte(`{"data":[{"id":123},{"name":"ok"}]}`))
+	if err != nil || strings.Join(models, ",") != "ok" {
+		t.Fatalf("numeric id skipped: %v %v", models, err)
+	}
+	// 完全不是模型列表的响应
+	if _, _, err = parseModelsPayload([]byte(`{"error":{"message":"nope"}}`)); err == nil {
+		t.Fatal("expected error for non-model response")
+	}
+}
+
 // ---- 拉取模型端点：key 鉴权 + 写回可用模型（免费标记不落盘） ----
 
 func TestAdminFetchModelsSetsAvailableModels(t *testing.T) {
@@ -160,6 +186,30 @@ func TestAdminFetchModelsChannelNotFound(t *testing.T) {
 	rootHandler(rr, adminReq(http.MethodPost, "/admin/api/channels/nope/fetch-models", "", tok))
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status=%d want 404", rr.Code)
+	}
+}
+
+// 上游 /models 返回 401 时，错误信息应包含目标 URL（便于用户排查鉴权/端点问题）
+func TestAdminFetchModelsErrorIncludesURL(t *testing.T) {
+	setupGateway(t)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"bad key"}`, http.StatusUnauthorized)
+	}))
+	defer up.Close()
+
+	mustPutChannel(t, &Channel{Name: "c", BaseURL: up.URL, Enabled: true,
+		Keys: []*UpKey{{Name: "k1", APIKey: "sk-bad", Enabled: true}}})
+	chid := store.Snapshot().Channels[0].ID
+	tok := adminToken(t)
+
+	rr := httptest.NewRecorder()
+	rootHandler(rr, adminReq(http.MethodPost, "/admin/api/channels/"+chid+"/fetch-models", "", tok))
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, up.URL) {
+		t.Fatalf("error should include target url %s: %s", up.URL, body)
 	}
 }
 

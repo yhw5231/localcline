@@ -77,9 +77,15 @@ func passFrame(frame []byte) []byte {
 	return append(frame, '\n', '\n')
 }
 
-// serveUpstreamResponse 把上游响应转发给客户端（rewrite 时做 reasoning -> reasoning_content 改写）。
-func serveUpstreamResponse(w http.ResponseWriter, upResp *http.Response, stream, rewrite bool) {
+// serveUpstreamResponse 把上游响应转发给客户端（rewrite 时做 reasoning -> reasoning_content 改写；
+// 渠道端点类型为 responses 时先做 Responses API -> chat/completions 转换）。
+func serveUpstreamResponse(w http.ResponseWriter, upResp *http.Response, stream, rewrite bool, endpointType string) {
 	defer upResp.Body.Close()
+
+	if endpointType == endpointResponses {
+		serveResponsesUpstream(w, upResp, stream, rewrite)
+		return
+	}
 
 	if !stream {
 		body, readErr := io.ReadAll(upResp.Body)
@@ -137,6 +143,78 @@ func serveUpstreamResponse(w http.ResponseWriter, upResp *http.Response, stream,
 		}
 		if readErr != nil {
 			break
+		}
+	}
+}
+
+// serveResponsesUpstream 转发 Responses API 上游的响应（非流式：response 对象
+// 转成 chat.completion；流式：response.* 事件转成 chat.completion.chunk 帧）。
+// 非 response 对象（如上游错误体）原样透传。
+func serveResponsesUpstream(w http.ResponseWriter, upResp *http.Response, stream, rewrite bool) {
+	defer upResp.Body.Close()
+
+	if !stream {
+		body, readErr := io.ReadAll(upResp.Body)
+		if readErr != nil {
+			writeJSONError(w, http.StatusBadGateway, "upstream read failed: "+readErr.Error(), "upstream_error")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		out, ok := responsesToChatCompletion(body)
+		if !ok {
+			out = body // 错误体等非 response 对象，保持上游原样
+		}
+		p, c := parseUsageJSON(out)
+		recordUsageToRecorder(w, p, c)
+		w.WriteHeader(upResp.StatusCode)
+		_, _ = w.Write(out)
+		return
+	}
+
+	if upResp.ContentLength == 0 {
+		copyHeader(w.Header(), upResp.Header)
+		w.WriteHeader(upResp.StatusCode)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(upResp.StatusCode)
+	flusher, _ := w.(http.Flusher)
+
+	conv := newResponsesStreamConv()
+	br := bufio.NewReader(upResp.Body)
+	for {
+		frame, readErr := readFrame(br)
+		if readErr != nil && readErr != io.EOF {
+			break
+		}
+		if len(frame) > 0 {
+			// usage 已在 response.completed 事件里映射，无需再从帧解析
+			if out := conv.convertFrame(frame); len(out) > 0 {
+				if p, c2, ok := parseUsageFromFrame(out); ok {
+					recordUsageToRecorder(w, p, c2)
+				}
+				_, _ = w.Write(out)
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+		}
+		if readErr != nil {
+			break
+		}
+	}
+	// 上游正常结束但未发 completed/incomplete/error 事件（或异常断流）：
+	// 补发 finish_reason + [DONE]，避免下游悬挂
+	if !conv.done {
+		if out := conv.finalize(); len(out) > 0 {
+			_, _ = w.Write(out)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		if flusher != nil {
+			flusher.Flush()
 		}
 	}
 }

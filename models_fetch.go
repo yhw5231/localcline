@@ -39,6 +39,10 @@ func fetchUpstreamModels(ctx context.Context, ch *Channel) (models []string, fre
 			lastErr = fmt.Errorf("key %q: %w", k.Name, ferr)
 			continue
 		}
+		if len(list) == 0 {
+			lastErr = fmt.Errorf("key %q: upstream returned an empty model list", k.Name)
+			continue
+		}
 		return list, freelist, k.Name, nil
 	}
 	if lastErr == nil {
@@ -65,7 +69,7 @@ func fetchModelsWithKey(ctx context.Context, cand *candidate) (models []string, 
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("request %s: %w", cand.modelsTarget(), err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
@@ -73,7 +77,7 @@ func fetchModelsWithKey(ctx context.Context, cand *candidate) (models []string, 
 		return nil, nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, nil, fmt.Errorf("upstream %d: %s", resp.StatusCode, truncate(string(body), 200))
+		return nil, nil, fmt.Errorf("%s -> upstream %d: %s", cand.modelsTarget(), resp.StatusCode, truncate(string(body), 200))
 	}
 	return parseModelsPayload(body)
 }
@@ -90,26 +94,60 @@ func (c *candidate) modelsTarget() string {
 	return c.ch.modelsURL()
 }
 
-// parseModelsPayload 解析上游 /models 响应：data[].id 为模型 ID；
+// parseModelsPayload 解析上游 /models 响应，兼容多种常见形态：
+//   - 标准 OpenAI：{"data":[{"id":...}]} / OpenRouter 额外带 pricing
+//   - 裸数组：[{"id":...}] 或 ["model-id", ...]
+//   - data 内 item 缺 id 时回退 name/model 字段
+//
 // data[].pricing（prompt/completion 或 input/output，数字或字符串）解析价格，
 // 两项价格都存在且均为 0 时该模型记为免费。
 func parseModelsPayload(body []byte) (models []string, free []string, err error) {
-	var parsed struct {
-		Data []struct {
-			ID      string          `json:"id"`
-			Pricing json.RawMessage `json:"pricing"`
-		} `json:"data"`
+	var raw struct {
+		Data json.RawMessage `json:"data"`
 	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, nil, fmt.Errorf("parse models response: %w", err)
+	// 非对象（如裸数组）或无 data 字段时，整体按数组解析
+	if json.Unmarshal(body, &raw) != nil || len(raw.Data) == 0 {
+		return parseModelItems(body)
 	}
-	for _, m := range parsed.Data {
-		if m.ID == "" {
+	return parseModelItems(raw.Data)
+}
+
+// parseModelItems 解析模型数组（JSON 元素为字符串，或含 id/name/model 的对象）。
+func parseModelItems(items json.RawMessage) (models []string, free []string, err error) {
+	var arr []json.RawMessage
+	if err := json.Unmarshal(items, &arr); err != nil {
+		return nil, nil, fmt.Errorf("parse models response: not an object with data nor an array: %.120s", string(items))
+	}
+	for _, it := range arr {
+		var s string
+		if json.Unmarshal(it, &s) == nil {
+			if s != "" {
+				models = append(models, s)
+			}
 			continue
 		}
-		models = append(models, m.ID)
+		var m struct {
+			ID      string          `json:"id"`
+			Name    string          `json:"name"`
+			Model   string          `json:"model"`
+			Pricing json.RawMessage `json:"pricing"`
+		}
+		if err := json.Unmarshal(it, &m); err != nil {
+			continue // 脏元素跳过，不拖垮整个列表
+		}
+		id := strings.TrimSpace(m.ID)
+		if id == "" {
+			id = strings.TrimSpace(m.Name)
+		}
+		if id == "" {
+			id = strings.TrimSpace(m.Model)
+		}
+		if id == "" {
+			continue
+		}
+		models = append(models, id)
 		if p, c, ok := parseModelPricing(m.Pricing); ok && p == 0 && c == 0 {
-			free = append(free, m.ID)
+			free = append(free, id)
 		}
 	}
 	return models, free, nil

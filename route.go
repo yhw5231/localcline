@@ -38,16 +38,20 @@ func (c *candidate) cooldownModel(model string) string {
 	return ""
 }
 
-// chatTarget 返回该候选的上游 chat 端点（key BaseURL 优先）。
+// chatTarget 返回该候选的上游对话端点（key BaseURL 优先；按渠道端点类型
+// 选择 /chat/completions 或 OpenAI Responses API 的 /responses）。
 func (c *candidate) chatTarget() string {
 	if u := c.k.BaseURL; u != "" {
 		base := trimSlash(u)
+		if c.ch.EndpointType == endpointResponses {
+			return responsesURLOf(base)
+		}
 		if endsWithChatCompletions(base) {
 			return base
 		}
 		return base + "/chat/completions"
 	}
-	return c.ch.chatURL()
+	return c.ch.endpointURL()
 }
 
 func trimSlash(s string) string {
@@ -223,7 +227,7 @@ func forwardChat(w http.ResponseWriter, r *http.Request, rawBody []byte, stream 
 
 		// 成功拿到可透传的响应：改写（可选）后回给下游
 		leaseMgr.RecordUse(cand.k.Proxy, cand.k.ID)
-		serveUpstreamResponse(w, resp, stream, cand.ch.Rewrite)
+		serveUpstreamResponse(w, resp, stream, cand.ch.Rewrite, cand.ch.EndpointType)
 		served = &cand
 		break
 	}
@@ -255,8 +259,13 @@ func forwardChat(w http.ResponseWriter, r *http.Request, rawBody []byte, stream 
 }
 
 // doUpstreamRequest 构造并发送上游请求：注入渠道头 + Bearer key。
+// 渠道端点类型为 responses 时，先把 chat/completions 请求体转换为 Responses API 格式。
 func doUpstreamRequest(ctx context.Context, client *http.Client, cand *candidate, rawBody []byte) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cand.chatTarget(), bytes.NewReader(rawBody))
+	body := rawBody
+	if cand.ch.EndpointType == endpointResponses {
+		body = chatToResponsesRequest(rawBody)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cand.chatTarget(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

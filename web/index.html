@@ -126,13 +126,20 @@
       </div>
       <div class="grid2">
         <label>Base URL（OpenAI 兼容前缀） <input id="chBaseURL" placeholder="https://api.cline.bot/api/v1"></label>
+        <label>端点类型 <select id="chEndpointType" title="上游使用的对话接口类型：chat/completions 为通用 OpenAI 兼容接口；responses 为 OpenAI Responses API（网关自动做格式转换）">
+          <option value="chat">chat/completions（默认）</option>
+          <option value="responses">responses（OpenAI Responses API）</option>
+        </select></label>
+      </div>
+      <div class="grid2">
         <label>模型列表端点（可选，默认 BaseURL + /models） <input id="chModelsURL" placeholder="留空使用默认"></label>
+        <div></div>
       </div>
       <div class="grid2">
         <label>静态模型列表（每行一个，用于 /v1/models 与路由过滤；留空不设限） <textarea id="chModels" rows="2" placeholder="deepseek/deepseek-v4-flash&#10;gpt-4o-mini"></textarea></label>
         <div>
-          <button id="fetchModelsBtn" class="btn" title="用本渠道的 key 请求上游模型列表，自动填充可用模型（带价格信息的上游会标出免费模型）">⤓ 从上游拉取模型列表</button>
-          <p class="muted" style="font-size:12px;margin:6px 0 0">拉取结果会填充左侧模型列表；上游价格输入/输出均为 0 的模型会标注「免费」（仅本次展示，不额外保存）。请先保存渠道（生成 key）后再拉取。</p>
+          <button id="fetchModelsBtn" class="btn" title="用本渠道的 key 请求上游模型列表，与已填模型合并后自动填充（带价格信息的上游会标出免费模型）">⤓ 从上游拉取模型列表</button>
+          <p class="muted" style="font-size:12px;margin:6px 0 0">拉取结果与已填模型合并去重后填充左侧列表；上游价格输入/输出均为 0 的模型会标注「免费」（仅本次展示，不额外保存）。请先保存渠道（生成 key）后再拉取，拉取后需点「保存」写入配置。</p>
         </div>
       </div>
       <div id="chModelList" class="chips"></div>
@@ -152,7 +159,18 @@
 
       <h4>上游 Key（按顺序故障转移）</h4>
       <div id="chKeys"></div>
-      <button class="btn small" id="addKeyBtn">+ 添加 Key</button>
+      <div class="row" style="margin-top:6px">
+        <button class="btn small" id="addKeyBtn">+ 添加 Key</button>
+        <button class="btn small" id="toggleBulkBtn">⇊ 批量导入</button>
+      </div>
+      <div id="bulkImportBox" class="keyblock hidden" style="margin-top:8px">
+        <textarea id="bulkKeysInput" rows="6" placeholder="每行一个，支持两种格式：&#10;sk-xxxx（名称自动生成）&#10;名称|sk-xxxx（自定义名称，也支持 名称:sk-xxxx）&#10;# 开头的行视为注释跳过"></textarea>
+        <div class="row" style="margin:8px 0 0">
+          <span class="muted" style="font-size:12px">导入的 key 默认启用、直连，代理可在下方各 key 块中单独设置。</span>
+          <span class="spacer"></span>
+          <button class="btn small" id="bulkImportBtn">导入</button>
+        </div>
+      </div>
     </div>
     <div class="modal-foot">
       <span id="channelErr" class="err"></span>
