@@ -85,11 +85,12 @@ type UpKey struct {
 type Channel struct {
 	ID            string            `json:"id"`
 	Name          string            `json:"name"`
-	BaseURL       string            `json:"base_url"`             // 如 https://api.cline.bot/api/v1
-	ModelsURL     string            `json:"models_url,omitempty"` // 模型列表端点；默认 BaseURL + /models
-	Models        []string          `json:"models,omitempty"`     // 静态模型列表（用于 /v1/models 聚合与路由过滤）
-	Headers       map[string]string `json:"headers,omitempty"`    // 渠道级自定义请求头
-	Rewrite       bool              `json:"rewrite_reasoning"`    // reasoning -> reasoning_content 改写（Cline 等需要）
+	Group         string            `json:"group,omitempty"`          // 自定义分组标签（仅用于 WebUI 归类/过滤，空为未分组）
+	BaseURL       string            `json:"base_url"`                 // 如 https://api.cline.bot/api/v1
+	ModelsURL     string            `json:"models_url,omitempty"`     // 模型列表端点；默认 BaseURL + /models
+	Models        []string          `json:"models,omitempty"`         // 静态模型列表（用于 /v1/models 聚合与路由过滤）
+	Headers       map[string]string `json:"headers,omitempty"`        // 渠道级自定义请求头
+	Rewrite       bool              `json:"rewrite_reasoning"`        // reasoning -> reasoning_content 改写（Cline 等需要）
 	CooldownScope string            `json:"cooldown_scope,omitempty"` // 冷却粒度："" / "key" 按 key 跨模型共享（默认）；"key_model" 按 (key,model)
 	Enabled       bool              `json:"enabled"`
 	Keys          []*UpKey          `json:"keys"`
@@ -283,6 +284,7 @@ func (s *GatewayStore) PutChannel(ch *Channel) error {
 
 func normalizeChannel(ch *Channel) error {
 	ch.Name = strings.TrimSpace(ch.Name)
+	ch.Group = strings.TrimSpace(ch.Group)
 	ch.BaseURL = strings.TrimSpace(ch.BaseURL)
 	if ch.Name == "" {
 		return errors.New("channel name required")
@@ -307,6 +309,24 @@ func normalizeChannel(ch *Channel) error {
 		}
 	}
 	return nil
+}
+
+// normalizeModelList 清理模型 ID 列表：去空白、去空项、去重、保序。
+func normalizeModelList(list []string) []string {
+	out := make([]string, 0, len(list))
+	seen := map[string]bool{}
+	for _, m := range list {
+		m = strings.TrimSpace(m)
+		if m == "" || seen[m] {
+			continue
+		}
+		seen[m] = true
+		out = append(out, m)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func normalizeUpKey(k *UpKey) error {

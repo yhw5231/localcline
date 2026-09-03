@@ -8,28 +8,31 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
 // ---- 请求记录 ----
 
-// RequestRecord 一条请求记录。
+// RequestRecord 一条大模型请求记录。
 type RequestRecord struct {
-	ID         string        `json:"id"`
-	Time       time.Time     `json:"time"`
-	Duration   time.Duration `json:"-"`
-	DurationMs int64         `json:"duration_ms"`
-	Method     string        `json:"method"`
-	Path       string        `json:"path"`
-	Status     int           `json:"status"`
-	BytesOut   int64         `json:"bytes_out"`
-	ClientIP   string        `json:"client_ip,omitempty"`
-	User       string        `json:"user,omitempty"`
-	Channel    string        `json:"channel,omitempty"`
-	Model      string        `json:"model,omitempty"`
-	Key        string        `json:"key,omitempty"` // 脱敏后
-	ErrMsg     string        `json:"error,omitempty"`
+	ID               string        `json:"id"`
+	Time             time.Time     `json:"time"`
+	Duration         time.Duration `json:"-"`
+	DurationMs       int64         `json:"duration_ms"`
+	Method           string        `json:"method"`
+	Path             string        `json:"path"`
+	Status           int           `json:"status"`
+	BytesOut         int64         `json:"bytes_out"`
+	ClientIP         string        `json:"client_ip,omitempty"`
+	User             string        `json:"user,omitempty"`
+	Channel          string        `json:"channel,omitempty"`
+	Model            string        `json:"model,omitempty"`
+	Key              string        `json:"key,omitempty"` // 脱敏后
+	PromptTokens     int64         `json:"prompt_tokens,omitempty"`
+	CompletionTokens int64         `json:"completion_tokens,omitempty"`
+	ErrMsg           string        `json:"error,omitempty"`
 }
 
 // RequestLog 固定容量环形缓冲，新记录覆盖最旧。
@@ -253,11 +256,20 @@ func maskKey(key string) string {
 	return key[:4] + mask + key[len(key)-4:]
 }
 
-// statsMiddleware 包裹任意 handler：记录每次请求的耗时 / 状态 / 输出字节 / 用户 / 渠道 / 模型 / key / token。
+// statsMiddleware 包裹任意 handler：为请求注入 reqStats 上下文与 responseRecorder；
+// 仅大模型接口请求写入请求日志与用量统计，系统后台请求（WebUI/Admin）不记。
 func statsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		statsServe(w, r, next)
 	}
+}
+
+// isLLMPath 判断请求路径是否为大模型网关接口（请求日志只记录这些）：
+// /v1/*（chat/completions、models、responses、embeddings 等）以及不带 /v1
+// 前缀的兼容别名（/models、/chat/completions），与 rootHandler 的网关分支
+// 保持一致；Admin / WebUI 等系统后台请求不记。
+func isLLMPath(path string) bool {
+	return strings.HasPrefix(path, "/v1/") || matchesPath(path, "/models", "/models/", "/chat/completions")
 }
 
 func statsServe(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
@@ -267,24 +279,31 @@ func statsServe(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
 	ctx := context.WithValue(r.Context(), reqStatsKey{}, rs)
 	next(rw, r.WithContext(ctx))
 
+	// 只记录大模型接口请求；WebUI / Admin 等系统后台请求不进日志
+	if !isLLMPath(r.URL.Path) {
+		return
+	}
+
 	status := rw.status
 	if status == 0 {
 		status = http.StatusOK
 	}
 	rec := RequestRecord{
-		ID:         strconv.FormatInt(time.Now().UnixNano(), 36),
-		Time:       start,
-		Duration:   time.Since(start),
-		DurationMs: time.Since(start).Milliseconds(),
-		Method:     r.Method,
-		Path:       r.URL.Path,
-		Status:     status,
-		BytesOut:   rw.bytes,
-		ClientIP:   clientIP(r),
-		User:       rs.user,
-		Channel:    rs.channel,
-		Model:      rs.model,
-		Key:        rs.key,
+		ID:               strconv.FormatInt(time.Now().UnixNano(), 36),
+		Time:             start,
+		Duration:         time.Since(start),
+		DurationMs:       time.Since(start).Milliseconds(),
+		Method:           r.Method,
+		Path:             r.URL.Path,
+		Status:           status,
+		BytesOut:         rw.bytes,
+		ClientIP:         clientIP(r),
+		User:             rs.user,
+		Channel:          rs.channel,
+		Model:            rs.model,
+		Key:              rs.key,
+		PromptTokens:     rs.promptTokens,
+		CompletionTokens: rs.completionTokens,
 	}
 	if status >= 400 {
 		rec.ErrMsg = http.StatusText(status)

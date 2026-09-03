@@ -88,6 +88,14 @@ textarea { resize: vertical; }
 .badge.on { background: rgba(53,194,110,.15); color: var(--ok); }
 .badge.off { background: rgba(224,82,82,.15); color: var(--err); }
 .badge.info { background: rgba(79,140,255,.15); color: var(--accent); }
+.badge.group { background: rgba(224,168,60,.15); color: var(--warn); }
+.badge.free { background: rgba(53,194,110,.15); color: var(--ok); font-size: 11px; padding: 1px 6px; font-style: normal; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 999px;
+  padding: 2px 10px; font-size: 12px;
+}
 .key-line { display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap; }
 .key-line .pname { color: var(--muted); font-size: 12px; }
 

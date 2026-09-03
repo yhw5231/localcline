@@ -41,6 +41,8 @@
       <div class="row">
         <h2>渠道</h2>
         <div class="spacer"></div>
+        <input id="channelSearch" placeholder="搜索名称 / 分组 / BaseURL / 模型…" style="max-width:280px">
+        <select id="channelGroupFilter" style="max-width:160px"><option value="">全部分组</option></select>
         <button id="addChannelBtn" class="btn primary">+ 新建渠道</button>
       </div>
       <div id="channelList" class="channel-list"></div>
@@ -69,7 +71,7 @@
         <button id="logsRefresh" class="btn">刷新</button>
       </div>
       <table class="tbl" id="logTable">
-        <thead><tr><th>时间</th><th>状态</th><th>耗时</th><th>渠道</th><th>key</th><th>模型</th><th>下游</th><th>出口</th><th>错误</th></tr></thead>
+        <thead><tr><th>时间</th><th>接口</th><th>状态</th><th>耗时</th><th>渠道</th><th>key</th><th>模型</th><th>Tokens (入/出)</th><th>下游</th><th>出口</th><th>错误</th></tr></thead>
         <tbody></tbody>
       </table>
     </section>
@@ -79,6 +81,7 @@
       <div class="row">
         <h2>本地代理池</h2>
         <div class="spacer"></div>
+        <input id="leaseSearch" placeholder="搜索池 / 租约ID / IPv6 / 分组…" style="max-width:280px">
         <label class="inline"><input type="checkbox" id="leasesAuto"> 自动刷新</label>
         <button id="leasesRefresh" class="btn">刷新</button>
       </div>
@@ -118,12 +121,21 @@
     <div class="modal-body">
       <div class="grid2">
         <label>渠道名称 <input id="chName" placeholder="如 Cline / OpenRouter"></label>
-        <label>Base URL（OpenAI 兼容前缀） <input id="chBaseURL" placeholder="https://api.cline.bot/api/v1"></label>
+        <label>分组（可选，用于归类/过滤渠道） <input id="chGroup" placeholder="如 免费 / 付费 / 主力" list="groupSuggestions"></label>
+        <datalist id="groupSuggestions"></datalist>
       </div>
       <div class="grid2">
+        <label>Base URL（OpenAI 兼容前缀） <input id="chBaseURL" placeholder="https://api.cline.bot/api/v1"></label>
         <label>模型列表端点（可选，默认 BaseURL + /models） <input id="chModelsURL" placeholder="留空使用默认"></label>
-        <label>静态模型列表（每行一个，用于 /v1/models 与路由过滤；留空不设限） <textarea id="chModels" rows="2" placeholder="deepseek/deepseek-v4-flash&#10;gpt-4o-mini"></textarea></label>
       </div>
+      <div class="grid2">
+        <label>静态模型列表（每行一个，用于 /v1/models 与路由过滤；留空不设限） <textarea id="chModels" rows="2" placeholder="deepseek/deepseek-v4-flash&#10;gpt-4o-mini"></textarea></label>
+        <div>
+          <button id="fetchModelsBtn" class="btn" title="用本渠道的 key 请求上游模型列表，自动填充可用模型（带价格信息的上游会标出免费模型）">⤓ 从上游拉取模型列表</button>
+          <p class="muted" style="font-size:12px;margin:6px 0 0">拉取结果会填充左侧模型列表；上游价格输入/输出均为 0 的模型会标注「免费」（仅本次展示，不额外保存）。请先保存渠道（生成 key）后再拉取。</p>
+        </div>
+      </div>
+      <div id="chModelList" class="chips"></div>
       <div class="row">
         <label class="inline"><input type="checkbox" id="chEnabled"> 启用渠道</label>
         <label class="inline" title="把上游返回的 reasoning 字段复制为 reasoning_content（Cline 渠道需要）"><input type="checkbox" id="chRewrite"> reasoning→reasoning_content 改写</label>

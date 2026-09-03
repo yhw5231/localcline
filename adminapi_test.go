@@ -225,7 +225,8 @@ func TestSharedLeaseCrossChannelViaAdminAPI(t *testing.T) {
 		t.Fatalf("Ensure A2: %v", err)
 	}
 
-	// 渠道 B：B1（异组，应与 A1 共用）
+	// 渠道 B：B1（异组，应复用 A1/A2 之一的租约——具体落在哪个租约取决于
+	// 本地缓存的遍历顺序，断言不指定具体哪个）
 	chB := &Channel{Name: "B", BaseURL: "https://b.example.com/v1", Enabled: true,
 		Keys: []*UpKey{mkKey("B1")}}
 	if err := store.PutChannel(chB); err != nil {
@@ -237,8 +238,9 @@ func TestSharedLeaseCrossChannelViaAdminAPI(t *testing.T) {
 		t.Fatalf("Ensure B1: %v", err)
 	}
 	rA1, _ := leaseMgr.Ensure(ctx, snapA.Keys[0].Proxy, snapA.Keys[0].ID, snapA.BaseURL)
-	if rB1.Addr != rA1.Addr {
-		t.Fatalf("B1 should share A1's IP, got %s vs %s", rB1.Addr, rA1.Addr)
+	rA2, _ := leaseMgr.Ensure(ctx, snapA.Keys[1].Proxy, snapA.Keys[1].ID, snapA.BaseURL)
+	if rB1.Addr != rA1.Addr && rB1.Addr != rA2.Addr {
+		t.Fatalf("B1 should share A1/A2's IP, got %s (A1=%s A2=%s)", rB1.Addr, rA1.Addr, rA2.Addr)
 	}
 	pool.mu.Lock()
 	if n := len(pool.leases); n != 2 {

@@ -99,11 +99,40 @@ async function loadState() {
 }
 
 // ---- 渠道列表 ----
-function renderChannels() {
-  const wrap = $("#channelList");
+// 渠道过滤：按关键字（名称/分组/BaseURL/模型）与分组下拉筛选
+function filterChannels(chans) {
+  const q = ($("#channelSearch").value || "").trim().toLowerCase();
+  const g = $("#channelGroupFilter").value;
+  return chans.filter((ch) => {
+    if (g && (ch.group || "") !== g) return false;
+    if (!q) return true;
+    const hay = [ch.name, ch.group, ch.base_url, (ch.models || []).join(" ")].join(" ").toLowerCase();
+    return hay.includes(q);
+  });
+}
+
+// 分组下拉选项 + 编辑器 datalist 候选
+function refreshGroupOptions() {
   const chans = (STATE && STATE.channels) || [];
-  if (!chans.length) {
+  const groups = [...new Set(chans.map((c) => (c.group || "").trim()).filter(Boolean))].sort();
+  const sel = $("#channelGroupFilter");
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">全部分组</option>' +
+    groups.map((g) => `<option value="${esc(g)}">${esc(g)}</option>`).join("");
+  if (groups.includes(cur)) sel.value = cur;
+  $("#groupSuggestions").innerHTML = groups.map((g) => `<option value="${esc(g)}">`).join("");
+}
+
+function renderChannels() {
+  refreshGroupOptions();
+  const wrap = $("#channelList");
+  const chans = filterChannels((STATE && STATE.channels) || []);
+  if (!(STATE && STATE.channels || []).length) {
     wrap.innerHTML = `<p class="muted">还没有渠道。点击右上角「新建渠道」添加第一个 OpenAI 兼容上游。</p>`;
+    return;
+  }
+  if (!chans.length) {
+    wrap.innerHTML = `<p class="muted">没有匹配筛选条件的渠道。</p>`;
     return;
   }
   wrap.innerHTML = chans.map((ch) => {
@@ -116,10 +145,14 @@ function renderChannels() {
         <span class="pname">代理: ${esc(p)}</span>
       </div>`;
     }).join("");
+    const modelLine = (ch.models || []).length
+      ? `<div class="key-line"><span class="pname">模型 ${ch.models.length} 个：${esc(ch.models.slice(0, 4).join("、"))}${ch.models.length > 4 ? " …" : ""}</span></div>`
+      : "";
     return `<div class="channel-card" data-id="${esc(ch.id)}">
       <div class="head">
         <span class="badge ${ch.enabled ? "on" : "off"}">${ch.enabled ? "启用" : "停用"}</span>
         <span class="name">${esc(ch.name)}</span>
+        ${ch.group ? `<span class="badge group">${esc(ch.group)}</span>` : ""}
         <span class="muted">${esc(ch.base_url)}</span>
         ${ch.rewrite_reasoning ? '<span class="badge info">reasoning改写</span>' : ""}
         ${ch.cooldown_scope === "key_model" ? '<span class="badge info">按(Key,模型)冷却</span>' : ""}
@@ -127,6 +160,7 @@ function renderChannels() {
         <button class="btn small" data-act="edit">编辑</button>
         <button class="btn small danger" data-act="del">删除</button>
       </div>
+      ${modelLine}
       ${keyLines || '<div class="key-line muted">无 key</div>'}
     </div>`;
   }).join("");
@@ -143,6 +177,8 @@ function renderChannels() {
     catch (e) { toast(e.message, true); }
   }));
 }
+$("#channelSearch").addEventListener("input", renderChannels);
+$("#channelGroupFilter").addEventListener("change", renderChannels);
 
 function proxyDesc(p) {
   if (p.kind === "static") return p.url || "static";
@@ -160,7 +196,7 @@ function proxyDesc(p) {
 
 // ---- 渠道编辑器 ----
 $("#addChannelBtn").addEventListener("click", () => openChannelEditor({
-  id: "", name: "", base_url: "", models_url: "", models: [], headers: {},
+  id: "", name: "", group: "", base_url: "", models_url: "", models: [], headers: {},
   rewrite_reasoning: false, cooldown_scope: "key", enabled: true, keys: [],
 }));
 
@@ -168,6 +204,7 @@ function openChannelEditor(ch) {
   editChannel = ch;
   $("#channelModalTitle").textContent = ch.id ? "编辑渠道：" + ch.name : "新建渠道";
   $("#chName").value = ch.name || "";
+  $("#chGroup").value = ch.group || "";
   $("#chBaseURL").value = ch.base_url || "";
   $("#chModelsURL").value = ch.models_url || "";
   $("#chModels").value = (ch.models || []).join("\n");
@@ -176,9 +213,21 @@ function openChannelEditor(ch) {
   $("#chCooldownScope").value = ch.cooldown_scope === "key_model" ? "key_model" : "key";
   renderHeaderRows(ch.headers || {});
   renderKeyBlocks(ch.keys || []);
+  renderModelChips();
   $("#channelErr").textContent = "";
   $("#channelModal").classList.remove("hidden");
 }
+
+// 可用模型 chips 展示（跟随左侧文本框实时变化）；freeSet 非空时为对应模型标注「免费」
+let freeModelSet = new Set();
+function renderModelChips() {
+  const el = $("#chModelList");
+  const models = $("#chModels").value.split("\n").map((s) => s.trim()).filter(Boolean);
+  el.innerHTML = models.map((m) =>
+    `<span class="chip">${esc(m)}${freeModelSet.has(m) ? '<i class="badge free">免费</i>' : ""}</span>`
+  ).join("");
+}
+$("#chModels").addEventListener("input", () => { renderModelChips(); });
 
 $$('[data-close="channelModal"]').forEach((b) => b.addEventListener("click", () => $("#channelModal").classList.add("hidden")));
 
@@ -293,6 +342,27 @@ function keyBlock(k) {
 }
 $("#addKeyBtn").addEventListener("click", () => $("#chKeys").appendChild(keyBlock({ name: "", api_key: "", enabled: true })));
 
+// 从上游拉取模型列表（用渠道 key 鉴权），填充可用模型并临时标注免费模型
+$("#fetchModelsBtn").addEventListener("click", async () => {
+  if (!editChannel.id) { toast("请先保存渠道（生成 key 后）再拉取模型列表", true); return; }
+  const btn = $("#fetchModelsBtn");
+  btn.disabled = true;
+  btn.textContent = "拉取中…";
+  try {
+    const r = await api("POST", `/admin/api/channels/${encodeURIComponent(editChannel.id)}/fetch-models`, {});
+    $("#chModels").value = (r.models || []).join("\n");
+    freeModelSet = new Set(r.free_models || []);
+    renderModelChips();
+    const nFree = (r.free_models || []).length;
+    toast(`已拉取 ${r.total} 个模型（key: ${r.key_used || "?"}）${nFree ? `，免费 ${nFree} 个` : ""}`);
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "⤓ 从上游拉取模型列表";
+  }
+});
+
 // 保存渠道
 $("#channelSaveBtn").addEventListener("click", async () => {
   const headers = {};
@@ -335,6 +405,7 @@ $("#channelSaveBtn").addEventListener("click", async () => {
   const ch = {
     id: editChannel.id || "",
     name: $("#chName").value.trim(),
+    group: $("#chGroup").value.trim(),
     base_url: $("#chBaseURL").value.trim(),
     models_url: $("#chModelsURL").value.trim(),
     models,
@@ -401,13 +472,20 @@ async function refreshLogs() {
   try {
     const data = await api("GET", "/admin/api/requests?limit=200");
     const tbody = $("#logTable tbody");
-    tbody.innerHTML = (data.records || []).map((r) => `<tr>
+    const recs = data.records || [];
+    if (!recs.length) {
+      tbody.innerHTML = `<tr><td colspan="11" class="muted">暂无大模型请求记录（仅记录 /v1/* 网关接口请求，如 chat/completions、models、responses）。</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = recs.map((r) => `<tr>
       <td class="muted">${esc((r.time || "").replace("T", " ").slice(2, 19))}</td>
+      <td class="muted">${esc(r.path || "")}</td>
       <td><span class="badge ${r.status < 400 ? "on" : "off"}">${r.status}</span></td>
       <td>${r.duration_ms}ms</td>
       <td>${esc(r.channel || "")}</td>
       <td>${esc(r.key || "")}</td>
       <td>${esc(r.model || "")}</td>
+      <td class="muted">${r.prompt_tokens || 0} / ${r.completion_tokens || 0}</td>
       <td>${esc(r.user || "")}</td>
       <td>${esc(r.client_ip || "")}</td>
       <td class="err">${esc(r.error || "")}</td>
@@ -448,8 +526,20 @@ $("#usageWindow").addEventListener("change", refreshUsage);
 async function refreshLeases() {
   try {
     const data = await api("GET", "/admin/api/pool/leases");
+    const q = ($("#leaseSearch").value || "").trim().toLowerCase();
+    let leases = data.leases || [];
+    const total = leases.length;
+    if (q) {
+      leases = leases.filter((l) =>
+        [l.pool_url, l.lease_id, l.ipv6, (l.groups || []).join(" ")]
+          .join(" ").toLowerCase().includes(q));
+    }
     const tbody = $("#leaseTable tbody");
-    tbody.innerHTML = (data.leases || []).map((l, i) => `<tr data-pool="${esc(l.pool_url)}" data-lease="${esc(l.lease_id)}">
+    if (!leases.length) {
+      tbody.innerHTML = `<tr><td colspan="9" class="muted">${q ? `无匹配「${esc(q)}」的租约（共 ${total} 条）。` : "当前没有租约。发起一次请求或点击「测试」后自动申请。"}</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = leases.map((l) => `<tr data-pool="${esc(l.pool_url)}" data-lease="${esc(l.lease_id)}">
       <td class="muted">${esc(l.pool_url)}</td>
       <td><code>${esc(l.lease_id)}</code>${l.shared ? ' <span class="badge info">共享</span>' : ""}</td>
       <td class="muted">${esc((l.groups || []).join("、"))}</td>
@@ -483,6 +573,7 @@ async function refreshLeases() {
   } catch (e) { toast(e.message, true); }
 }
 $("#leasesRefresh").addEventListener("click", refreshLeases);
+$("#leaseSearch").addEventListener("input", refreshLeases);
 let leasesTimer = null;
 $("#leasesAuto").addEventListener("change", (e) => {
   if (leasesTimer) clearInterval(leasesTimer);

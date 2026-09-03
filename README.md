@@ -15,7 +15,11 @@ reasoning_content` 改写（现改为**渠道级开关**）、请求日志与用
 ## 功能总览
 
 - **多渠道**：每个渠道一个 OpenAI 兼容上游（`BaseURL` + 多个账号 key）。
-  渠道可配置自定义请求头（模拟特定客户端指纹）、静态模型列表、模型列表端点。
+  渠道可配置自定义请求头（模拟特定客户端指纹）、静态模型列表、模型列表端点，
+  并支持**自定义分组**（WebUI 按分组归类/过滤）。
+- **模型列表**：渠道编辑页可**用渠道 key（含其代理）从上游拉取模型列表**并一键设为
+  可用模型（默认与手工列表合并，`?replace=1` 全量替换）；带价格信息的上游会在
+  编辑器里为输入/输出价格均为 0 的模型标注**免费**（仅展示标记，不额外存储）。
 - **每 key 独立代理**：
   - `直连`
   - `固定代理`：`http(s)://user:pass@host:port` 或 `socks5://...`
@@ -25,11 +29,13 @@ reasoning_content` 改写（现改为**渠道级开关**）、请求日志与用
   (key, model)）跳过故障 key。
 - **reasoning 改写**（渠道可选）：把上游 `reasoning` 复制为 `reasoning_content`，
   流式/非流式都支持（Cline 渠道需要，供 sub2api 等下游识别 thinking）。
-- **请求日志**：最近 N 条请求（环形缓冲），含渠道/key/模型/状态/耗时/错误。
+- **请求日志**：仅记录**大模型网关接口**请求（`/v1/*`，如 chat/completions、models、
+  responses；Admin/WebUI 等系统后台请求不记），环形缓冲保留最近 N 条，含接口/渠道/
+  key/模型/token 数/状态/耗时/错误。
 - **用量统计**：SQLite 逐条记录输入/输出 token，支持 今日/24h/7d/30d/全部 窗口，
   按下游 key、渠道、模型、上游 key 聚合。
-- **WebUI**：渠道与 key 管理、通用密钥签发、日志、用量、代理池连通性测试、
-  手动换 IP / 释放租约、单 key 连通性测试。
+- **WebUI**：渠道与 key 管理（支持关键字搜索 + 分组过滤）、通用密钥签发、日志、
+  用量、代理池租约搜索、连通性测试、手动换 IP / 释放租约、单 key 连通性测试。
 
 ## 快速开始
 
@@ -62,7 +68,8 @@ curl http://localhost:8080/v1/chat/completions \
   -d '{"model":"deepseek/deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-`GET /v1/models` 聚合所有启用渠道的模型列表（静态列表 ∪ models 端点拉取，去重）。
+`GET /v1/models` 聚合所有启用渠道的模型列表（静态列表 ∪ 已拉取列表 ∪ models 端点
+实时拉取，去重）。
 
 ## 部署说明
 
@@ -356,6 +363,7 @@ git pull && docker compose up -d --build       # 本地构建部署
 | --- | --- |
 | `GET /admin/api/state` | 渠道、下游 key、代理池租约缓存总览 |
 | `PUT /admin/api/channels` | 新增/整体更新渠道（含内嵌 keys） |
+| `POST /admin/api/channels/{id}/fetch-models` | 用渠道 key 拉取上游模型列表并设为可用模型（默认合并，`?replace=1` 全量替换；免费清单随响应返回仅作展示，不持久化） |
 | `DELETE /admin/api/channels/{id}` | 删除渠道（自动释放其池租约） |
 | `PUT /admin/api/gwkeys` | 新增/更新下游 key（key 留空自动生成） |
 | `DELETE /admin/api/gwkeys/{id}` | 删除下游 key |

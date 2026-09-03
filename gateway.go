@@ -70,16 +70,24 @@ type modelsEntry struct {
 }
 
 // gatewayModels 聚合所有启用渠道的模型列表（去重）。
-// 渠道声明了静态 Models 时直接使用；否则尝试拉取其 models 端点（失败不阻塞其它渠道）。
+// 渠道声明了模型列表（静态配置或拉取结果）时直接使用；否则尝试拉取其 models
+// 端点（失败不阻塞其它渠道）。
 func gatewayModels(w http.ResponseWriter, r *http.Request) {
 	snap := store.Snapshot()
 	seen := map[string]bool{}
 	var ids []string
+	addModel := func(id string) {
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
 
 	type fetchJob struct {
 		url    string
 		header map[string]string
-		ch     *Channel
+		apiKey string // 渠道第一个启用 key，用于 Bearer 鉴权
 	}
 	var jobs []fetchJob
 	results := make(chan []string, len(snap.Channels))
@@ -90,10 +98,7 @@ func gatewayModels(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(ch.Models) > 0 {
 			for _, m := range ch.Models {
-				if !seen[m] {
-					seen[m] = true
-					ids = append(ids, m)
-				}
+				addModel(m)
 			}
 			continue
 		}
@@ -101,7 +106,14 @@ func gatewayModels(w http.ResponseWriter, r *http.Request) {
 		if u == "" {
 			continue
 		}
-		jobs = append(jobs, fetchJob{url: u, header: ch.Headers, ch: ch})
+		apiKey := ""
+		for _, k := range ch.Keys {
+			if k.Enabled {
+				apiKey = k.APIKey
+				break
+			}
+		}
+		jobs = append(jobs, fetchJob{url: u, header: ch.Headers, apiKey: apiKey})
 	}
 
 	// 并发拉取各渠道动态模型列表（5s 超时）
@@ -109,17 +121,14 @@ func gatewayModels(w http.ResponseWriter, r *http.Request) {
 		go func(j fetchJob) {
 			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 			defer cancel()
-			results <- fetchChannelModels(ctx, j.url, j.header)
+			results <- fetchChannelModels(ctx, j.url, j.header, j.apiKey)
 		}(j)
 	}
 	for range jobs {
 		select {
 		case list := <-results:
 			for _, m := range list {
-				if !seen[m] {
-					seen[m] = true
-					ids = append(ids, m)
-				}
+				addModel(m)
 			}
 		case <-r.Context().Done():
 			return
@@ -143,13 +152,16 @@ type modelsList struct {
 	Data   []modelsEntry `json:"data"`
 }
 
-// fetchChannelModels 拉取单个渠道的模型列表；首个 id 字符串数组字段被接受。
-// 失败返回空列表（聚合接口尽力而为）。
-func fetchChannelModels(ctx context.Context, url string, headers map[string]string) []string {
+// fetchChannelModels 拉取单个渠道的模型列表；apiKey 非空时带 Bearer 鉴权，
+// 同时发送渠道自定义头。首个 id 字符串数组字段被接受。失败返回空列表（聚合接口尽力而为）。
+func fetchChannelModels(ctx context.Context, url string, headers map[string]string, apiKey string) []string {
 	client := &http.Client{Timeout: 6 * time.Second}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	for name, value := range headers {
 		if value != "" {

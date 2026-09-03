@@ -26,6 +26,7 @@ func adminAPIHandler() http.Handler {
 	mux.HandleFunc("POST /admin/api/pool/release", handleAdminPoolRelease)
 	mux.HandleFunc("GET /admin/api/pool/leases", handleAdminPoolLeases)
 	mux.HandleFunc("POST /admin/api/testkey", handleAdminTestKey)
+	mux.HandleFunc("POST /admin/api/channels/{id}/fetch-models", handleAdminFetchModels)
 	mux.HandleFunc("GET /admin/api/requests", handleAdminRequests)
 	mux.HandleFunc("GET /admin/api/usage", handleAdminUsage)
 
@@ -62,6 +63,7 @@ func handleAdminState(w http.ResponseWriter, r *http.Request) {
 	type channelInfo struct {
 		ID         string   `json:"id"`
 		Name       string   `json:"name"`
+		Group      string   `json:"group,omitempty"`
 		Enabled    bool     `json:"enabled"`
 		KeysTotal  int      `json:"keys_total"`
 		KeysOn     int      `json:"keys_enabled"`
@@ -70,7 +72,7 @@ func handleAdminState(w http.ResponseWriter, r *http.Request) {
 	}
 	chans := make([]channelInfo, 0, len(snap.Channels))
 	for _, ch := range snap.Channels {
-		ci := channelInfo{ID: ch.ID, Name: ch.Name, Enabled: ch.Enabled, KeysTotal: len(ch.Keys)}
+		ci := channelInfo{ID: ch.ID, Name: ch.Name, Group: ch.Group, Enabled: ch.Enabled, KeysTotal: len(ch.Keys)}
 		for _, k := range ch.Keys {
 			if k.Enabled {
 				ci.KeysOn++
@@ -279,6 +281,53 @@ func handleAdminPoolRelease(w http.ResponseWriter, r *http.Request) {
 // handleAdminPoolLeases 列出网关持有的池租约缓存。
 func handleAdminPoolLeases(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"leases": leaseMgr.ListLeases()})
+}
+
+// handleAdminFetchModels 用渠道的 key 拉取上游模型列表，写入渠道可用模型
+// （含免费标记）；replace=false 时与现有列表合并。返回拉取结果供 WebUI 展示。
+func handleAdminFetchModels(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	snap := store.Snapshot()
+	var ch *Channel
+	for _, c := range snap.Channels {
+		if c.ID == id {
+			ch = c
+			break
+		}
+	}
+	if ch == nil {
+		writeJSONError(w, http.StatusNotFound, "channel not found", "not_found")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), fetchModelsTimeout+10*time.Second)
+	defer cancel()
+	models, free, usedKey, err := fetchUpstreamModels(ctx, ch)
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, "fetch models failed: "+err.Error(), "upstream_error")
+		return
+	}
+
+	// 合并模式：保留手工配置的模型，并入拉取结果（去重保序）
+	if r.URL.Query().Get("replace") != "1" {
+		models = normalizeModelList(append(append([]string{}, ch.Models...), models...))
+	}
+
+	ch.Models = models
+	if err := store.PutChannel(ch); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "save channel: "+err.Error(), "internal")
+		return
+	}
+	log.Printf("admin fetched models for channel %q via key %q: %d models (%d free)",
+		ch.Name, usedKey, len(models), len(free))
+	// free_models 仅随本次响应返回供 WebUI 标注展示，不写入渠道配置
+	writeJSON(w, http.StatusOK, map[string]any{
+		"channel_id":  ch.ID,
+		"models":      models,
+		"free_models": free,
+		"key_used":    usedKey,
+		"total":       len(models),
+	})
 }
 
 // handleAdminTestKey 用指定渠道 key 发一条测试请求，验证上游与代理连通性。
