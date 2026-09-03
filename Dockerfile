@@ -10,7 +10,9 @@ ARG GOPROXY=https://goproxy.cn,direct
 RUN GOPROXY=${GOPROXY} go mod download
 COPY *.go ./
 COPY web ./web
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/cline2api .
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath \
+	-ldflags="-s -w -X main.version=${VERSION}" -o /out/cline2api .
 
 FROM alpine:3.22
 # su-exec：entrypoint 修正 /data 属主后降权运行（避免 bind mount 属主不匹配导致启动失败）

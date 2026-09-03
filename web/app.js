@@ -41,6 +41,16 @@ async function api(method, path, body) {
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+// ---- 版本号显示（无需鉴权） ----
+(async () => {
+  try {
+    const r = await (await fetch("/api/version")).json();
+    const v = r && r.version ? r.version : "dev";
+    $("#loginVersion").textContent = v;
+    $("#topVersion").textContent = v;
+  } catch { /* 后端未提供版本时保持默认 dev */ }
+})();
+
 // ---- 登录 ----
 function showLogin() {
   $("#loginView").classList.remove("hidden");

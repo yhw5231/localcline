@@ -50,7 +50,7 @@ func main() {
 		Handler:           statsMiddleware(rootHandler),
 		ReadHeaderTimeout: 30 * time.Second,
 	}
-	log.Printf("unigate listening on :%s (admin default %s/%s)", cfg.Port, cfg.AdminUser, cfg.AdminPass)
+	log.Printf("unigate v%s listening on :%s (admin default %s/%s)", displayVersion(), cfg.Port, cfg.AdminUser, cfg.AdminPass)
 	log.Fatal(srv.ListenAndServe())
 }
 
@@ -58,6 +58,8 @@ func main() {
 func rootHandler(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	switch {
+	case path == "/api/version":
+		handleVersion(w, r)
 	case path == "/login":
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)

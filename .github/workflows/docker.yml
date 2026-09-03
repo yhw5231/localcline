@@ -51,7 +51,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           # alpine 版 Go 镜像无 git，direct 需要 git；CI 走官方代理拉依赖
-          build-args: GOPROXY=https://proxy.golang.org,direct
+          build-args: |
+            GOPROXY=https://proxy.golang.org,direct
+            VERSION=${{ steps.meta.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

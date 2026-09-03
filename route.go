@@ -282,7 +282,7 @@ func doUpstreamRequest(ctx context.Context, client *http.Client, cand *candidate
 		}
 	}
 	if req.Header.Get("User-Agent") == "" {
-		req.Header.Set("User-Agent", "unigate/1.0")
+		req.Header.Set("User-Agent", "unigate/"+displayVersion())
 	}
 	if stream {
 		req.Header.Set("Accept", "text/event-stream")

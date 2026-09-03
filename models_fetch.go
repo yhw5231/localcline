@@ -66,7 +66,7 @@ func fetchModelsWithKey(ctx context.Context, cand *candidate) (models []string, 
 		req.Header.Set("Authorization", "Bearer "+cand.k.APIKey)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "unigate/1.0")
+	req.Header.Set("User-Agent", "unigate/"+displayVersion())
 	applyChannelHeaders(req.Header, cand.ch.Headers)
 
 	resp, err := client.Do(req)

@@ -10,7 +10,7 @@
 <!-- 登录视图 -->
 <div id="loginView" class="login-wrap hidden">
   <form id="loginForm" class="login-card">
-    <h1>UniGate</h1>
+    <h1>UniGate <span id="loginVersion" class="ver muted">dev</span></h1>
     <p class="muted">通用 AI 网关控制台</p>
     <label>用户名 <input id="loginUser" autocomplete="username" required></label>
     <label>密码 <input id="loginPass" type="password" autocomplete="current-password" required></label>
@@ -31,6 +31,7 @@
       <button data-tab="leases" class="tab">代理池</button>
     </nav>
     <div class="spacer"></div>
+    <span class="ver muted" id="topVersion" title="构建版本"></span>
     <span id="whoami" class="muted"></span>
     <button id="logoutBtn" class="btn ghost">退出</button>
   </header>

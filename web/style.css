@@ -90,6 +90,13 @@ textarea { resize: vertical; }
 .badge.info { background: rgba(79,140,255,.15); color: var(--accent); }
 .badge.group { background: rgba(224,168,60,.15); color: var(--warn); }
 .badge.free { background: rgba(53,194,110,.15); color: var(--ok); font-size: 11px; padding: 1px 6px; font-style: normal; }
+
+/* 版本号 */
+.ver {
+  font-size: 12px; font-weight: normal; font-family: ui-monospace, Consolas, monospace;
+  border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px;
+  background: var(--panel2);
+}
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0; }
 .chip {
   display: inline-flex; align-items: center; gap: 6px;

@@ -234,6 +234,23 @@ func TestAdminTestKeyRequestFormat(t *testing.T) {
 	}
 }
 
+func TestVersionEndpoint(t *testing.T) {
+	// /api/version 公开返回版本号（dev 或 -ldflags 注入值），无需鉴权
+	rr := httptest.NewRecorder()
+	rootHandler(rr, httptest.NewRequest(http.MethodGet, "/api/version", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var out map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	v, ok := out["version"]
+	if !ok || v == "" || v != displayVersion() {
+		t.Fatalf("version mismatch: got %q want %q", v, displayVersion())
+	}
+}
+
 func TestWebUIStaticServed(t *testing.T) {
 	setupGateway(t)
 	rr := httptest.NewRecorder()
