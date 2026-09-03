@@ -4,8 +4,10 @@
 # 修正后立刻通过 su-exec 降权，进程实际以非 root 运行。
 set -e
 
-PUID="${PUID:-100}"
-PGID="${PGID:-100}"
+# 默认取镜像内 app 用户的实际 uid/gid（alpine adduser -S 分配值随版本可能变化）；
+# 需要固定身份时通过环境变量 PUID/PGID 指定
+PUID="${PUID:-$(id -u app 2>/dev/null || echo 100)}"
+PGID="${PGID:-$(id -g app 2>/dev/null || echo 100)}"
 
 # 非 root 启动（docker run --user=...）：无权 chown，直接运行，属主由调用方保证
 if [ "$(id -u)" != "0" ]; then
