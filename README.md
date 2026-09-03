@@ -38,10 +38,10 @@ go run .
 # 浏览器打开 http://localhost:8080 ，默认 admin/admin（务必修改）
 ```
 
-Docker：
+Docker（默认拉取 GHCR 预构建镜像，无需本地构建）：
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
 
 ### WebUI 里配一个渠道的最小流程
@@ -66,21 +66,19 @@ curl http://localhost:8080/v1/chat/completions \
 
 ## 部署说明
 
-### 方式一：Docker Compose（推荐）
+### 方式一：Docker Compose（推荐，在线更新）
 
-前置要求：Docker 20.10+ 与 Docker Compose v2（`docker compose version` 可验证）。
+官方镜像发布在 GHCR：`ghcr.io/yhw5231/localcline`，支持 `linux/amd64` 与 `linux/arm64`。
 
 ```bash
-# 1. 克隆代码
-git clone https://github.com/yhw5231/localcline.git
-cd localcline
+# 1. 准备 compose 文件（可直接克隆仓库使用其中的 docker-compose.yml）
+mkdir unigate && cd unigate
+curl -o docker-compose.yml https://raw.githubusercontent.com/yhw5231/localcline/main/docker-compose.yml
 
-# 2.（可选）按需编辑 docker-compose.yml：端口映射、环境变量
+# 2. 拉取镜像并启动
+docker compose up -d
 
-# 3. 构建并启动（首次构建需下载 Go 依赖，约 1~3 分钟）
-docker compose up -d --build
-
-# 4. 查看日志确认启动成功
+# 3. 查看日志确认启动成功
 docker compose logs -f
 # 出现 "unigate listening on :8080" 即正常，Ctrl+C 退出跟踪
 ```
@@ -88,19 +86,30 @@ docker compose logs -f
 启动后浏览器打开 `http://<主机IP>:8080`，默认账号 `admin` / `admin`，
 **生产环境务必通过环境变量修改管理员账号密码**（见下文安全清单）。
 
+**在线更新**（无需克隆代码）：
+
+```bash
+docker compose pull && docker compose up -d
+docker image prune -f    # 可选：清理旧镜像
+```
+
 常用运维命令：
 
 ```bash
 docker compose restart          # 重启
 docker compose down             # 停止（data/ 目录保留）
-docker compose up -d --build    # 升级：拉新代码后重新构建
 docker compose logs -f --tail=100
 ```
+
+> 想本地构建：克隆仓库后把 compose 里的 `image` 注释掉、取消 `build` 段注释，
+> 再 `docker compose up -d --build`。
+
+镜像版本标签：`latest`（main 分支最新）、`<短sha>`（如 `e1c5ecc`，可锁定版本回滚）、
+`v1.2.3`（正式发布打 tag 时）。
 
 ### 方式二：纯 Docker（不用 Compose）
 
 ```bash
-docker build -t unigate:local .
 mkdir -p ./data
 
 docker run -d --name unigate \
@@ -109,7 +118,7 @@ docker run -d --name unigate \
   -v "$(pwd)/data:/data" \
   -e ADMIN_USERNAME=admin \
   -e ADMIN_PASSWORD=改成强密码 \
-  unigate:local
+  ghcr.io/yhw5231/localcline:latest
 
 # 数据目录属主想匹配宿主机某用户时，指定运行身份（可选）：
 docker run -d --name unigate \
@@ -117,8 +126,11 @@ docker run -d --name unigate \
   -p 8080:8080 \
   -v "$(pwd)/data:/data" \
   -e PUID=1000 -e PGID=1000 \
-  unigate:local
+  ghcr.io/yhw5231/localcline:latest
 ```
+
+本地构建（改代码后自用）：克隆仓库后 `docker build -t unigate:local .`，
+把上面命令中的镜像名换成 `unigate:local` 即可。
 
 > 说明：镜像基于 alpine。entrypoint 以 root 启动，会自动把 `/data` 属主修正为
 > `PUID:PGID`（默认 100:100，即镜像内 app 用户），随后立即降权为该身份运行——
@@ -132,7 +144,7 @@ docker run -d --name unigate \
 
 - 挂载了 NFS/SMB 等网络存储导致 root 无权 chown（root-squash）：改用 `-e PUID=<宿主UID> -e PGID=<宿主GID>` 匹配存储属主，或手动在宿主机 `chown -R 100:100 ./data`；
 - 显式指定了 `--user`：改为以默认身份运行，或使 `--user` 与目录属主一致；
-- 旧版镜像（无 entrypoint 自动 chown）：在宿主机执行 `chown -R 100:100 ./data` 后 `docker compose up -d --build` 重建。
+- 旧版镜像（无 entrypoint 自动 chown）：在宿主机执行 `chown -R 100:100 ./data` 后拉取新镜像重建。
 
 ### 方式三：源码编译部署
 
@@ -258,9 +270,9 @@ healthcheck:
 ### 升级
 
 ```bash
-git pull
-docker compose up -d --build     # Compose 部署
-# 或源码部署：重新 go build 后重启服务
+docker compose pull && docker compose up -d    # Compose（在线镜像）
+git pull && docker compose up -d --build       # 本地构建部署
+# 或源码部署：git pull 重新 go build 后重启服务
 ```
 
 - 数据格式向后兼容：旧 `gateway.json` / `usage.db` 会自动迁移（如用量库自动补

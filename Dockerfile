@@ -1,5 +1,8 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.26-alpine AS builder
+# 构建阶段固定在宿主平台运行，按 TARGETARCH 交叉编译（多架构构建无需 qemu 模拟 Go 编译）
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY third_party ./third_party
@@ -7,7 +10,7 @@ ARG GOPROXY=https://goproxy.cn,direct
 RUN GOPROXY=${GOPROXY} go mod download
 COPY *.go ./
 COPY web ./web
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/cline2api .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/cline2api .
 
 FROM alpine:3.22
 # su-exec：entrypoint 修正 /data 属主后降权运行（避免 bind mount 属主不匹配导致启动失败）
