@@ -4,10 +4,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -174,6 +176,61 @@ func TestAdminTestKeyEndpoint(t *testing.T) {
 	}
 	if up.count() != 1 || up.lastAuth() != "Bearer sk-1" {
 		t.Fatalf("upstream not called correctly: calls=%d auth=%q", up.count(), up.lastAuth())
+	}
+}
+
+func TestAdminTestKeyRequestFormat(t *testing.T) {
+	// 测试请求必须是最小标准 OpenAI chat 请求：不带 max_tokens（新版模型已移除该参数），
+	// 带 Accept: application/json 与明确 UA（避免 Go 默认 UA 被上游拒绝）。
+	setupGateway(t)
+	tok := adminToken(t)
+	var mu sync.Mutex
+	var gotBody map[string]any
+	var gotAccept, gotUA, gotPath string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		_ = json.Unmarshal(b, &gotBody)
+		gotAccept = r.Header.Get("Accept")
+		gotUA = r.Header.Get("User-Agent")
+		gotPath = r.URL.Path
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"pong"}}]}`))
+	}))
+	defer up.Close()
+	mustPutChannel(t, &Channel{Name: "c", BaseURL: up.URL, Enabled: true,
+		Keys: []*UpKey{{Name: "k1", APIKey: "sk-1", Enabled: true}}})
+	kid := store.Snapshot().Channels[0].Keys[0].ID
+	chid := store.Snapshot().Channels[0].ID
+
+	rr := httptest.NewRecorder()
+	rootHandler(rr, adminReq(http.MethodPost, "/admin/api/testkey",
+		`{"channel_id":"`+chid+`","key_id":"`+kid+`","model":"m1"}`, tok))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	mu.Lock()
+	body, accept, ua, path := gotBody, gotAccept, gotUA, gotPath
+	mu.Unlock()
+	if path != "/chat/completions" {
+		t.Fatalf("path = %s, want /chat/completions", path)
+	}
+	if accept != "application/json" {
+		t.Fatalf("Accept = %q, want application/json", accept)
+	}
+	if ua == "" || ua == "Go-http-client/1.1" {
+		t.Fatalf("User-Agent = %q, want explicit UA", ua)
+	}
+	if _, has := body["max_tokens"]; has {
+		t.Fatalf("test body must not carry max_tokens: %v", body)
+	}
+	if body["stream"] != false {
+		t.Fatalf("stream should be false: %v", body)
+	}
+	msgs, _ := body["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("messages: %v", body["messages"])
 	}
 }
 

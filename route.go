@@ -190,7 +190,7 @@ func forwardChat(w http.ResponseWriter, r *http.Request, rawBody []byte, stream 
 		}
 
 		client := newUpstreamClient(route)
-		resp, err := doUpstreamRequest(r.Context(), client, &cand, rawBody)
+		resp, err := doUpstreamRequest(r.Context(), client, &cand, rawBody, stream, r.Header)
 		if err != nil {
 			lastErr = "upstream: " + err.Error()
 			cool.Mark(cand.k.ID, cm, cfg.NetErrCooldown)
@@ -258,9 +258,11 @@ func forwardChat(w http.ResponseWriter, r *http.Request, rawBody []byte, stream 
 	return nil
 }
 
-// doUpstreamRequest 构造并发送上游请求：注入渠道头 + Bearer key。
+// doUpstreamRequest 构造并发送上游请求：注入渠道头 + Bearer key，
+// 透传下游的 UA/Accept（无则按流式/非流式给默认值），保证请求与标准
+// OpenAI 客户端直连形态一致。
 // 渠道端点类型为 responses 时，先把 chat/completions 请求体转换为 Responses API 格式。
-func doUpstreamRequest(ctx context.Context, client *http.Client, cand *candidate, rawBody []byte) (*http.Response, error) {
+func doUpstreamRequest(ctx context.Context, client *http.Client, cand *candidate, rawBody []byte, stream bool, srcHeader http.Header) (*http.Response, error) {
 	body := rawBody
 	if cand.ch.EndpointType == endpointResponses {
 		body = chatToResponsesRequest(rawBody)
@@ -272,6 +274,20 @@ func doUpstreamRequest(ctx context.Context, client *http.Client, cand *candidate
 	req.Header.Set("Content-Type", "application/json")
 	if cand.k.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+cand.k.APIKey)
+	}
+	// 与客户端直连一致：透传下游 UA，缺省给出明确 UA（避免 Go 默认 UA 被上游/CDN 拒绝）
+	if srcHeader != nil {
+		if ua := srcHeader.Get("User-Agent"); ua != "" {
+			req.Header.Set("User-Agent", ua)
+		}
+	}
+	if req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", "unigate/1.0")
+	}
+	if stream {
+		req.Header.Set("Accept", "text/event-stream")
+	} else {
+		req.Header.Set("Accept", "application/json")
 	}
 	applyChannelHeaders(req.Header, cand.ch.Headers)
 	return client.Do(req)

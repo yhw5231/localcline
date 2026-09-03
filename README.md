@@ -17,9 +17,11 @@ reasoning_content` 改写（现改为**渠道级开关**）、请求日志与用
 - **多渠道**：每个渠道一个 OpenAI 兼容上游（`BaseURL` + 多个账号 key）。
   渠道可配置自定义请求头（模拟特定客户端指纹）、静态模型列表、模型列表端点，
   并支持**自定义分组**（WebUI 按分组归类/过滤）。
-- **模型列表**：渠道编辑页可**用渠道 key（含其代理）从上游拉取模型列表**并一键设为
-  可用模型（默认与手工列表合并，`?replace=1` 全量替换）；带价格信息的上游会在
-  编辑器里为输入/输出价格均为 0 的模型标注**免费**（仅展示标记，不额外存储）。
+- **模型列表**：渠道编辑页可**用渠道 key（含其代理）从上游拉取模型列表**，弹出候选
+  清单**勾选要启用的模型**（默认勾选当前已启用项，可选全选/全不选，确定后写入列表）；
+  带价格信息的上游会在编辑器里为输入/输出价格均为 0 的模型标注**免费**（仅展示标记，
+  不额外存储）。手工添加且不在候选中的模型保留。Admin API `?replace=1` 仍保留全量
+  替换旧行为。
 - **每 key 独立代理**：
   - `直连`
   - `固定代理`：`http(s)://user:pass@host:port` 或 `socks5://...`
@@ -363,7 +365,7 @@ git pull && docker compose up -d --build       # 本地构建部署
 | --- | --- |
 | `GET /admin/api/state` | 渠道、下游 key、代理池租约缓存总览 |
 | `PUT /admin/api/channels` | 新增/整体更新渠道（含内嵌 keys） |
-| `POST /admin/api/channels/{id}/fetch-models` | 用渠道 key 拉取上游模型列表并设为可用模型（默认合并，`?replace=1` 全量替换；免费清单随响应返回仅作展示，不持久化） |
+| `POST /admin/api/channels/{id}/fetch-models` | 用渠道 key 拉取上游模型列表，默认 dry-run 返回候选（`fetched`/`free_models`/`enabled`）供 WebUI 勾选启用，不写回渠道；`?replace=1` 全量替换写回（兼容旧脚本）；免费清单仅随响应展示，不持久化 |
 | `DELETE /admin/api/channels/{id}` | 删除渠道（自动释放其池租约） |
 | `PUT /admin/api/gwkeys` | 新增/更新下游 key（key 留空自动生成） |
 | `DELETE /admin/api/gwkeys/{id}` | 删除下游 key |

@@ -99,6 +99,20 @@ textarea { resize: vertical; }
 .key-line { display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap; }
 .key-line .pname { color: var(--muted); font-size: 12px; }
 
+/* 拉取模型候选勾选面板 */
+.fetch-panel {
+  margin-top: 8px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel2); padding: 8px 10px;
+}
+.fetch-panel-head { display: flex; align-items: center; gap: 8px; }
+.fetch-list {
+  max-height: 220px; overflow: auto; margin-top: 6px;
+  display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; font-size: 12px;
+}
+.fetch-list label { display: flex; align-items: center; gap: 6px; padding: 1px 4px; white-space: nowrap; overflow: hidden; }
+.fetch-list label:hover { background: var(--border); color: var(--text); }
+@media (max-width: 800px) { .fetch-list { grid-template-columns: 1fr; } }
+
 /* 弹窗 */
 .modal {
   position: fixed; inset: 0; background: rgba(0,0,0,.55);

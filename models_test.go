@@ -102,28 +102,33 @@ func TestAdminFetchModelsSetsAvailableModels(t *testing.T) {
 	chid := store.Snapshot().Channels[0].ID
 	tok := adminToken(t)
 
-	// 默认合并模式：手工模型保留，拉取结果并入
+	// 默认 dry-run：返回候选与 free 标注，不写回渠道（供 WebUI 勾选启用）
 	rr := httptest.NewRecorder()
 	rootHandler(rr, adminReq(http.MethodPost, "/admin/api/channels/"+chid+"/fetch-models", "", tok))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("fetch-models status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	var out struct {
-		Models     []string `json:"models"`
+		Fetched    []string `json:"fetched"`
 		FreeModels []string `json:"free_models"`
+		Enabled    []string `json:"enabled"`
 		Total      int      `json:"total"`
 		KeyUsed    string   `json:"key_used"`
 	}
 	_ = json.Unmarshal(rr.Body.Bytes(), &out)
-	if out.Total != 4 || out.KeyUsed != "k1" {
+	if out.Total != 3 || out.KeyUsed != "k1" {
 		t.Fatalf("fetch result: %+v", out)
 	}
-	if out.Models[0] != "handmade" {
-		t.Fatalf("merge mode should keep handmade first, got %v", out.Models)
+	if len(out.Fetched) != 3 || out.Fetched[0] != "free-model" {
+		t.Fatalf("fetched candidates: %v", out.Fetched)
 	}
-	// 免费清单随响应返回（供展示），但渠道配置中不落盘
+	// 免费清单随响应返回（供展示），渠道配置中不落盘
 	if strings.Join(out.FreeModels, ",") != "free-model" {
 		t.Fatalf("response free_models: %v", out.FreeModels)
+	}
+	// enabled 返回当前已启用集合（供前端默认勾选）
+	if strings.Join(out.Enabled, ",") != "handmade" {
+		t.Fatalf("response enabled: %v", out.Enabled)
 	}
 	mu.Lock()
 	if auths["/models"] != "Bearer sk-test" {
@@ -131,9 +136,10 @@ func TestAdminFetchModelsSetsAvailableModels(t *testing.T) {
 	}
 	mu.Unlock()
 
+	// dry-run 不写回渠道：仍只有手工模型
 	ch := store.Snapshot().Channels[0]
-	if len(ch.Models) != 4 || ch.Models[0] != "handmade" {
-		t.Fatalf("channel models not updated: %v", ch.Models)
+	if len(ch.Models) != 1 || ch.Models[0] != "handmade" {
+		t.Fatalf("dry-run should not modify channel models: %v", ch.Models)
 	}
 	// 分组持久化
 	if ch.Group != "主力" {

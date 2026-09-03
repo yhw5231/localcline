@@ -375,31 +375,61 @@ $("#bulkImportBtn").addEventListener("click", () => {
   toast(`已导入 ${imported} 个 key，请点「保存」写入配置`);
 });
 
-// 从上游拉取模型列表（用渠道 key 鉴权），与已填模型合并去重后回填，临时标注免费模型
+// 从上游拉取模型列表（用渠道 key 鉴权）：dry-run 只取候选清单，
+// 弹出勾选面板，用户勾选要启用的模型后点「确定」写入左侧列表
+let fetchedCandidates = [];        // 本次拉取的候选（用于确定时区分手工项）
+let fetchedFreeSet = new Set();
+
+async function fetchModelsDryRun() {
+  if (!editChannel.id) throw new Error("请先保存渠道（生成 key 后）再拉取模型列表");
+  const r = await api("POST", `/admin/api/channels/${encodeURIComponent(editChannel.id)}/fetch-models`, {});
+  return { fetched: r.fetched || r.models || [], free: r.free_models || [], key: r.key_used || "?" };
+}
+
+function fetchSetCheckbox(v) { v.checked = true; }
+function fetchClearCheckbox(v) { v.checked = false; }
+
 $("#fetchModelsBtn").addEventListener("click", async () => {
-  if (!editChannel.id) { toast("请先保存渠道（生成 key 后）再拉取模型列表", true); return; }
   const btn = $("#fetchModelsBtn");
   btn.disabled = true;
   btn.textContent = "拉取中…";
   $("#channelErr").textContent = "";
   try {
-    const r = await api("POST", `/admin/api/channels/${encodeURIComponent(editChannel.id)}/fetch-models`, {});
-    const fetched = r.models || [];
-    const existing = $("#chModels").value.split("\n").map((s) => s.trim()).filter(Boolean);
-    const merged = [...new Set([...existing, ...fetched])]; // 保留手工已填项（fetch-models 合并模式也保留渠道配置）
-    $("#chModels").value = merged.join("\n");
-    freeModelSet = new Set(r.free_models || []);
-    renderModelChips();
-    const nFree = (r.free_models || []).length;
-    toast(`已拉取 ${fetched.length} 个模型（key: ${r.key_used || "?"}）${nFree ? `，免费 ${nFree} 个` : ""}，合计 ${merged.length} 个，记得点「保存」`);
+    const { fetched, free, key } = await fetchModelsDryRun();
+    if (!fetched.length) throw new Error("上游返回的模型列表为空");
+    fetchedCandidates = fetched;
+    fetchedFreeSet = new Set(free);
+    const existing = new Set($("#chModels").value.split("\n").map((s) => s.trim()).filter(Boolean));
+    const list = $("#fetchList");
+    list.innerHTML = fetched.map((m) =>
+      `<label title="${esc(m)}"><input type="checkbox" value="${esc(m)}" ${existing.has(m) ? "checked" : ""}> ${esc(m)}${fetchedFreeSet.has(m) ? '<i class="badge free">免费</i>' : ""}</label>`
+    ).join("");
+    $("#fetchCount").textContent = fetched.length;
+    $("#fetchPanel").classList.remove("hidden");
+    toast(`已拉取 ${fetched.length} 个模型（key: ${key}），勾选要启用的后点「确定」`);
   } catch (e) {
-    // 错误同时写入弹窗底部常驻显示（toast 会自动消失）
     $("#channelErr").textContent = "拉取失败: " + e.message;
     toast("拉取失败: " + e.message, true);
   } finally {
     btn.disabled = false;
     btn.textContent = "⤓ 从上游拉取模型列表";
   }
+});
+
+$("#fetchAllBtn").addEventListener("click", () => $$("#fetchList input[type=checkbox]").forEach(fetchSetCheckbox));
+$("#fetchNoneBtn").addEventListener("click", () => $$("#fetchList input[type=checkbox]").forEach(fetchClearCheckbox));
+
+// 确定：勾选模型 + 手工添加的非候选模型 → 写入左侧列表
+$("#fetchApplyBtn").addEventListener("click", () => {
+  const chosen = $$("#fetchList input[type=checkbox]:checked").map((c) => c.value);
+  const candSet = new Set(fetchedCandidates);
+  const manual = $("#chModels").value.split("\n").map((s) => s.trim()).filter(Boolean).filter((m) => !candSet.has(m));
+  const merged = [...new Set([...chosen, ...manual])];
+  $("#chModels").value = merged.join("\n");
+  freeModelSet = fetchedFreeSet;
+  renderModelChips();
+  $("#fetchPanel").classList.add("hidden");
+  toast(`已启用 ${chosen.length} 个模型，请点「保存」写入配置`);
 });
 
 // 保存渠道

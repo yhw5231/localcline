@@ -136,13 +136,27 @@
         <div></div>
       </div>
       <div class="grid2">
-        <label>静态模型列表（每行一个，用于 /v1/models 与路由过滤；留空不设限） <textarea id="chModels" rows="2" placeholder="deepseek/deepseek-v4-flash&#10;gpt-4o-mini"></textarea></label>
+        <label>启用模型列表（每行一个，用于 /v1/models 与路由过滤；留空不设限） <textarea id="chModels" rows="2" placeholder="deepseek/deepseek-v4-flash&#10;gpt-4o-mini"></textarea></label>
         <div>
-          <button id="fetchModelsBtn" class="btn" title="用本渠道的 key 请求上游模型列表，与已填模型合并后自动填充（带价格信息的上游会标出免费模型）">⤓ 从上游拉取模型列表</button>
-          <p class="muted" style="font-size:12px;margin:6px 0 0">拉取结果与已填模型合并去重后填充左侧列表；上游价格输入/输出均为 0 的模型会标注「免费」（仅本次展示，不额外保存）。请先保存渠道（生成 key）后再拉取，拉取后需点「保存」写入配置。</p>
+          <button id="fetchModelsBtn" class="btn" title="用本渠道的 key 请求上游模型列表，弹出候选清单勾选要启用的模型（带价格信息的上游会标出免费模型）">⤓ 从上游拉取模型列表</button>
+          <p class="muted" style="font-size:12px;margin:6px 0 0">拉取后从候选清单中勾选要启用的模型，点「确定」写入左侧列表；勾选结果需点「保存」写入配置。手工添加且不在候选中的模型会保留。</p>
         </div>
       </div>
       <div id="chModelList" class="chips"></div>
+      <div id="fetchPanel" class="fetch-panel hidden">
+        <div class="fetch-panel-head">
+          <span class="muted" style="font-size:12px">候选模型（勾选启用，默认勾选当前已启用项）</span>
+          <span class="spacer"></span>
+          <button class="btn small" id="fetchAllBtn">全选</button>
+          <button class="btn small" id="fetchNoneBtn">全不选</button>
+        </div>
+        <div id="fetchList" class="fetch-list"></div>
+        <div class="row" style="margin-top:8px">
+          <span class="muted" style="font-size:12px">共 <span id="fetchCount">0</span> 个</span>
+          <span class="spacer"></span>
+          <button class="btn small" id="fetchApplyBtn">确定启用勾选项</button>
+        </div>
+      </div>
       <div class="row">
         <label class="inline"><input type="checkbox" id="chEnabled"> 启用渠道</label>
         <label class="inline" title="把上游返回的 reasoning 字段复制为 reasoning_content（Cline 渠道需要）"><input type="checkbox" id="chRewrite"> reasoning→reasoning_content 改写</label>

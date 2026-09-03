@@ -283,8 +283,9 @@ func handleAdminPoolLeases(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"leases": leaseMgr.ListLeases()})
 }
 
-// handleAdminFetchModels 用渠道的 key 拉取上游模型列表，写入渠道可用模型
-// （含免费标记）；replace=false 时与现有列表合并。返回拉取结果供 WebUI 展示。
+// handleAdminFetchModels 用渠道的 key 拉取上游模型列表。
+// 默认（dry_run=1 或未带 replace）只返回候选列表供 WebUI 勾选启用，不写回渠道；
+// replace=1 时全量替换写回渠道（兼容旧脚本）。返回拉取结果供 WebUI 展示。
 func handleAdminFetchModels(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	snap := store.Snapshot()
@@ -302,31 +303,39 @@ func handleAdminFetchModels(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), fetchModelsTimeout+10*time.Second)
 	defer cancel()
-	models, free, usedKey, err := fetchUpstreamModels(ctx, ch)
+	fetched, free, usedKey, err := fetchUpstreamModels(ctx, ch)
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "fetch models failed: "+err.Error(), "upstream_error")
 		return
 	}
 
-	// 合并模式：保留手工配置的模型，并入拉取结果（去重保序）
+	// dry-run（默认）：不写回渠道，仅返回候选 + 当前已启用集合
 	if r.URL.Query().Get("replace") != "1" {
-		models = normalizeModelList(append(append([]string{}, ch.Models...), models...))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"channel_id":  ch.ID,
+			"fetched":     fetched,
+			"free_models": free,
+			"key_used":    usedKey,
+			"enabled":     ch.Models,
+			"total":       len(fetched),
+		})
+		return
 	}
 
-	ch.Models = models
+	// 兼容旧行为：全量替换写回渠道
+	ch.Models = normalizeModelList(fetched)
 	if err := store.PutChannel(ch); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "save channel: "+err.Error(), "internal")
 		return
 	}
-	log.Printf("admin fetched models for channel %q via key %q: %d models (%d free)",
-		ch.Name, usedKey, len(models), len(free))
-	// free_models 仅随本次响应返回供 WebUI 标注展示，不写入渠道配置
+	log.Printf("admin replaced models for channel %q via key %q: %d models (%d free)",
+		ch.Name, usedKey, len(fetched), len(free))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"channel_id":  ch.ID,
-		"models":      models,
+		"models":      ch.Models,
 		"free_models": free,
 		"key_used":    usedKey,
-		"total":       len(models),
+		"total":       len(ch.Models),
 	})
 }
 
@@ -359,11 +368,12 @@ func handleAdminTestKey(w http.ResponseWriter, r *http.Request) {
 	if msg == "" {
 		msg = "ping"
 	}
+	// 最小标准 chat 请求：与客户端直连一致，不携带 max_tokens 等参数
+	// （新版 OpenAI 模型已移除 max_tokens，携带会直接 400）
 	reqBody, _ := json.Marshal(map[string]any{
-		"model":      model,
-		"messages":   []map[string]string{{"role": "user", "content": msg}},
-		"stream":     false,
-		"max_tokens": 16,
+		"model":    model,
+		"messages": []map[string]string{{"role": "user", "content": msg}},
+		"stream":   false,
 	})
 
 	cand := candidate{ch: ch, k: k}
@@ -379,7 +389,7 @@ func handleAdminTestKey(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 	start := time.Now()
-	resp, err := doUpstreamRequest(ctx, client, &cand, reqBody)
+	resp, err := doUpstreamRequest(ctx, client, &cand, reqBody, false, nil)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "proxy": proxyDesc, "error": err.Error(), "latency_ms": time.Since(start).Milliseconds()})
 		return
