@@ -11,6 +11,10 @@ services:
     environment:
       PORT: "8080"
       DATA_DIR: /data
+      # 数据目录属主（启动时自动 chown /data 后以此身份运行；默认 100:100，
+      # 与宿主机目录属主无关——bind mount 任意属主均可直接部署）
+      # PUID: 1000
+      # PGID: 1000
       # WebUI 管理员（默认 admin/admin，务必修改）
       # ADMIN_USERNAME: admin
       # ADMIN_PASSWORD: admin

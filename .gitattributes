@@ -1,0 +1,2 @@
+# entrypoint 等脚本必须 LF：Windows 检出转 CRLF 会让容器内 sh 报 '\r' 错误
+*.sh text eol=lf

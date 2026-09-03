@@ -110,10 +110,29 @@ docker run -d --name unigate \
   -e ADMIN_USERNAME=admin \
   -e ADMIN_PASSWORD=改成强密码 \
   unigate:local
+
+# 数据目录属主想匹配宿主机某用户时，指定运行身份（可选）：
+docker run -d --name unigate \
+  --restart unless-stopped \
+  -p 8080:8080 \
+  -v "$(pwd)/data:/data" \
+  -e PUID=1000 -e PGID=1000 \
+  unigate:local
 ```
 
-> 说明：镜像基于 alpine，以非 root 用户 `app` 运行；宿主机 `./data` 目录需可写
-> （Windows/挂载 NAS 时若遇权限问题，可 `chmod 777 data` 或调整目录属主）。
+> 说明：镜像基于 alpine。entrypoint 以 root 启动，会自动把 `/data` 属主修正为
+> `PUID:PGID`（默认 100:100，即镜像内 app 用户），随后立即降权为该身份运行——
+> 因此**宿主机挂载目录属主任意均可直接部署**；进程实际不以 root 运行。
+> 显式 `--user=<uid>:<gid>` 启动时跳过 chown，属主由调用方保证。
+
+### 常见问题（容器反复重启）
+
+**启动日志报 `open /data/gateway.json.tmp: permission denied` 并循环重启**：数据目录
+写入权限不足。容器 entrypoint 已自动 `chown /data`，一般不再出现；若仍遇到：
+
+- 挂载了 NFS/SMB 等网络存储导致 root 无权 chown（root-squash）：改用 `-e PUID=<宿主UID> -e PGID=<宿主GID>` 匹配存储属主，或手动在宿主机 `chown -R 100:100 ./data`；
+- 显式指定了 `--user`：改为以默认身份运行，或使 `--user` 与目录属主一致；
+- 旧版镜像（无 entrypoint 自动 chown）：在宿主机执行 `chown -R 100:100 ./data` 后 `docker compose up -d --build` 重建。
 
 ### 方式三：源码编译部署
 
