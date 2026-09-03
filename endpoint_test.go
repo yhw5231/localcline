@@ -251,6 +251,48 @@ func TestResponsesToolCallsTranslation(t *testing.T) {
 	}
 }
 
+// 回归：/admin/api/testkey 对 responses 渠道应只转换一次请求体
+// （测试入口与 doUpstreamRequest 各自转换会导致双重转换，input 丢失发空请求）。
+func TestAdminTestKeyResponsesSingleConversion(t *testing.T) {
+	setupGateway(t)
+	tok := adminToken(t)
+	var mu sync.Mutex
+	var gotBody map[string]any
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		_ = json.Unmarshal(b, &gotBody)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","status":"completed",
+			"output":[{"type":"message","content":[{"type":"output_text","text":"pong"}]}],
+			"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
+	}))
+	defer up.Close()
+	mustPutChannel(t, &Channel{Name: "r", BaseURL: up.URL, EndpointType: "responses", Enabled: true,
+		Keys: []*UpKey{{Name: "k1", APIKey: "sk-1", Enabled: true}}})
+	kid := store.Snapshot().Channels[0].Keys[0].ID
+	chid := store.Snapshot().Channels[0].ID
+
+	rr := httptest.NewRecorder()
+	rootHandler(rr, adminReq(http.MethodPost, "/admin/api/testkey",
+		`{"channel_id":"`+chid+`","key_id":"`+kid+`","model":"m1"}`, tok))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	mu.Lock()
+	body := gotBody
+	mu.Unlock()
+	input, _ := body["input"].([]any)
+	if len(input) != 1 {
+		t.Fatalf("upstream received %v: input lost (double conversion?)", body)
+	}
+	item, _ := input[0].(map[string]any)
+	if item["type"] != "message" || item["role"] != "user" || item["content"] != "ping" {
+		t.Fatalf("input item: %v", item)
+	}
+}
+
 // 非 response 对象（错误体）应原样透传
 func TestResponsesErrorPassthrough(t *testing.T) {
 	raw := []byte(`{"error":{"message":"insufficient quota","type":"insufficient_quota"}}`)

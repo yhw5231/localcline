@@ -365,10 +365,6 @@ func handleAdminTestKey(w http.ResponseWriter, r *http.Request) {
 		"stream":     false,
 		"max_tokens": 16,
 	})
-	// responses 型渠道：测试请求同样按 Responses API 格式发送
-	if ch.EndpointType == endpointResponses {
-		reqBody = chatToResponsesRequest(reqBody)
-	}
 
 	cand := candidate{ch: ch, k: k}
 	route, err := resolveProxy(&cand)
