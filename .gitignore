@@ -2,6 +2,7 @@
 /cline2api
 /cline2api-go
 *.exe
+*.exe~
 
 # 本地环境配置（含密钥）
 .env
