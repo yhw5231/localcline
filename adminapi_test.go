@@ -234,6 +234,125 @@ func TestAdminTestKeyRequestFormat(t *testing.T) {
 	}
 }
 
+// TestAdminTestModelEndpoint：渠道级测试端点——逐 (key, 模型) 故障转移、
+// first_only、指定模型、responses 渠道请求体转换。
+func TestAdminTestModelEndpoint(t *testing.T) {
+	setupGateway(t)
+	tok := adminToken(t)
+
+	// k1 返回 500（触发转移），k2 返回 200
+	fail := newUpstream(t, http.StatusInternalServerError, `{"error":"boom"}`)
+	okSrv := newUpstream(t, http.StatusOK, `{"choices":[{"message":{"content":"pong"}}]}`)
+	mustPutChannel(t, &Channel{Name: "c", BaseURL: okSrv.URL, Models: []string{"m1", "m2"}, Enabled: true,
+		Keys: []*UpKey{
+			{Name: "k1", APIKey: "sk-1", Enabled: true, BaseURL: fail.URL},
+			{Name: "k2", APIKey: "sk-2", Enabled: true},
+		}})
+	chid := store.Snapshot().Channels[0].ID
+
+	// 全部启用 key：m1 在 k1 失败后应由 k2 成功
+	rr := httptest.NewRecorder()
+	rootHandler(rr, adminReq(http.MethodPost, "/admin/api/channels/"+chid+"/test-model",
+		`{}`, tok))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var out struct {
+		Results []struct {
+			OK    bool   `json:"ok"`
+			Key   string `json:"key"`
+			Model string `json:"model"`
+		} `json:"results"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &out)
+	// 每个模型 2 条（k1 失败 + k2 成功），共 4 条；最终每模型都成功
+	if len(out.Results) != 4 {
+		t.Fatalf("expected 4 results (2 models × failover), got %d: %+v", len(out.Results), out.Results)
+	}
+	for i, m := range []string{"m1", "m1", "m2", "m2"} {
+		if out.Results[i].Model != m {
+			t.Fatalf("result[%d].model=%q want %q", i, out.Results[i].Model, m)
+		}
+	}
+	if out.Results[0].OK || out.Results[0].Key != "k1" {
+		t.Fatalf("result[0] should be k1 failure: %+v", out.Results[0])
+	}
+	if !out.Results[1].OK || out.Results[1].Key != "k2" {
+		t.Fatalf("result[1] should be k2 success: %+v", out.Results[1])
+	}
+	if !out.Results[3].OK {
+		t.Fatalf("result[3] should succeed: %+v", out.Results[3])
+	}
+	if fail.count() != 2 || okSrv.count() != 2 {
+		t.Fatalf("upstream calls: fail=%d ok=%d, want 2/2", fail.count(), okSrv.count())
+	}
+
+	// first_only：只用 k1（必失败）
+	rr2 := httptest.NewRecorder()
+	rootHandler(rr2, adminReq(http.MethodPost, "/admin/api/channels/"+chid+"/test-model",
+		`{"first_only":true}`, tok))
+	var out2 struct {
+		Results []struct {
+			OK  bool `json:"ok"`
+		} `json:"results"`
+	}
+	_ = json.Unmarshal(rr2.Body.Bytes(), &out2)
+	if len(out2.Results) != 2 || out2.Results[0].OK {
+		t.Fatalf("first_only should only use k1 and fail: %+v", out2.Results)
+	}
+	if okSrv.count() != 2 {
+		t.Fatalf("first_only must not touch k2: ok=%d", okSrv.count())
+	}
+}
+
+// TestAdminTestModelResponsesChannel：responses 渠道的测试请求应转换为
+// Responses API 格式（POST /responses，input 数组）。
+func TestAdminTestModelResponsesChannel(t *testing.T) {
+	setupGateway(t)
+	tok := adminToken(t)
+	var mu sync.Mutex
+	var gotPath string
+	var gotBody map[string]any
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		gotPath = r.URL.Path
+		_ = json.Unmarshal(b, &gotBody)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"pong"}]}]}`))
+	}))
+	defer up.Close()
+	mustPutChannel(t, &Channel{Name: "c", BaseURL: up.URL, EndpointType: "responses", Enabled: true,
+		Keys: []*UpKey{{Name: "k1", APIKey: "sk-1", Enabled: true}}})
+	chid := store.Snapshot().Channels[0].ID
+
+	rr := httptest.NewRecorder()
+	rootHandler(rr, adminReq(http.MethodPost, "/admin/api/channels/"+chid+"/test-model",
+		`{"models":"m1"}`, tok))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var out struct {
+		Results []struct {
+			OK bool `json:"ok"`
+		} `json:"results"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &out)
+	if len(out.Results) != 1 || !out.Results[0].OK {
+		t.Fatalf("responses channel test should pass: %+v", out.Results)
+	}
+	mu.Lock()
+	path, body := gotPath, gotBody
+	mu.Unlock()
+	if path != "/v1/responses" {
+		t.Fatalf("path = %s, want /v1/responses", path)
+	}
+	if _, ok := body["input"].([]any); !ok {
+		t.Fatalf("responses body should carry input array: %v", body)
+	}
+}
+
 func TestVersionEndpoint(t *testing.T) {
 	// /api/version 公开返回版本号（dev 或 -ldflags 注入值），无需鉴权
 	rr := httptest.NewRecorder()

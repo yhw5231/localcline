@@ -96,6 +96,7 @@ $$(".tab").forEach((btn) => btn.addEventListener("click", () => {
   $$(".tabpane").forEach((p) => p.classList.add("hidden"));
   $("#tab-" + btn.dataset.tab).classList.remove("hidden");
   if (btn.dataset.tab === "logs") refreshLogs();
+  if (btn.dataset.tab === "test") refreshTestTab();
   if (btn.dataset.tab === "usage") refreshUsage();
   if (btn.dataset.tab === "leases") refreshLeases();
 }));
@@ -577,6 +578,149 @@ $("#logsAuto").addEventListener("change", (e) => {
   if (logsTimer) clearInterval(logsTimer);
   if (e.target.checked) logsTimer = setInterval(refreshLogs, 5000);
 });
+
+// ---- 渠道测试 ----
+// 对指定渠道按模型逐个发起真实对话请求（后端按渠道 key 顺序故障转移），
+// 结果逐行写入表格。单渠道串行执行，避免并发触发上游限流。
+let testRunning = false;
+let testAbort = false;
+
+function testChannelSel() {
+  const sel = $("#testChannel");
+  const chans = (STATE && STATE.channels) || [];
+  const cur = sel.value;
+  sel.innerHTML = chans.map((c) =>
+    `<option value="${esc(c.id)}">${esc(c.name)}${c.enabled ? "" : "（已停用）"}（key ${c.keys ? c.keys.length : 0}）</option>`
+  ).join("") || '<option value="">（无渠道）</option>';
+  if (chans.some((c) => c.id === cur)) sel.value = cur;
+}
+
+function testModelChips() {
+  const wrap = $("#testModelChips");
+  const ch = ((STATE && STATE.channels) || []).find((c) => c.id === $("#testChannel").value);
+  const models = (ch && ch.models) || [];
+  wrap.innerHTML = models.length
+    ? models.map((m) => `<span class="chip clickable" data-model="${esc(m)}" title="点击加入测试清单">+ ${esc(m)}</span>`).join("")
+    : '<span class="muted" style="font-size:12px">渠道未配置启用模型</span>';
+  wrap.querySelectorAll(".chip").forEach((chip) => chip.addEventListener("click", () => {
+    const m = chip.dataset.model;
+    const lines = $("#testModels").value.split("\n").map((s) => s.trim()).filter(Boolean);
+    if (!lines.includes(m)) {
+      lines.push(m);
+      $("#testModels").value = lines.join("\n");
+    }
+  }));
+}
+
+function refreshTestTab() {
+  testChannelSel();
+  testModelChips();
+}
+
+$("#testChannel").addEventListener("change", testModelChips);
+$("#testRefreshBtn").addEventListener("click", async () => {
+  try { await loadState(); refreshTestTab(); toast("已刷新"); }
+  catch (e) { toast(e.message, true); }
+});
+
+function testRow(res) {
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td>${esc(res.model)}</td>
+    <td class="t-status"></td>
+    <td class="muted">${esc((res.key || "(未命名)"))}</td>
+    <td class="t-code"></td>
+    <td>${res.latency_ms != null ? res.latency_ms + "ms" : ""}</td>
+    <td class="muted">${esc(res.proxy || "")}</td>
+    <td class="t-snippet"></td>`;
+  renderTestStatus(tr.querySelector(".t-status"), tr.querySelector(".t-code"), tr.querySelector(".t-snippet"), res);
+  return tr;
+}
+
+function renderTestStatus(statusEl, codeEl, snippetEl, res) {
+  if (res.running) {
+    statusEl.innerHTML = '<span class="badge info">测试中…</span>';
+    return;
+  }
+  statusEl.innerHTML = res.ok ? '<span class="badge on">通过</span>' : '<span class="badge off">失败</span>';
+  codeEl.innerHTML = res.status ? `<span class="badge ${res.status < 400 ? "on" : "off"}">${res.status}</span>` : '<span class="muted">—</span>';
+  snippetEl.innerHTML = res.ok
+    ? `<span class="muted">${esc(res.snippet || "")}</span>`
+    : `<span class="err">${esc(res.error || res.snippet || "未知错误")}</span>`;
+}
+
+function testSummaryLine(pass, fail) {
+  const el = $("#testSummary");
+  el.classList.remove("hidden");
+  el.innerHTML = fail === 0
+    ? `<span class="badge on">全部通过</span><span class="muted">共 ${pass} 项</span>`
+    : `<span class="badge off">失败 ${fail}</span><span class="muted">通过 ${pass} / 共 ${pass + fail} 项</span>`;
+}
+
+$("#testRunBtn").addEventListener("click", async () => {
+  if (testRunning) { testAbort = true; return; }
+  const ch = ((STATE && STATE.channels) || []).find((c) => c.id === $("#testChannel").value);
+  if (!ch) { toast("没有可测试的渠道", true); return; }
+  let models = $("#testModels").value.split("\n").map((s) => s.trim()).filter(Boolean);
+  if (!models.length) {
+    models = (ch.models || []).slice();
+    if (!models.length) { toast("渠道未配置启用模型，请在输入框指定要测试的模型", true); return; }
+  }
+  const onlyFirst = $("#testOnlyFirst").checked;
+  if (onlyFirst && models.length > 3) {
+    models = models.slice(0, 3);
+    toast(`已按「仅测前 3 个模型」截取：${models.join("、")}`);
+  }
+
+  testRunning = true;
+  testAbort = false;
+  const btn = $("#testRunBtn");
+  btn.textContent = "■ 停止";
+  btn.classList.add("danger");
+  $("#testTable tbody").innerHTML = "";
+  $("#testSummary").classList.add("hidden");
+
+  let pass = 0, fail = 0;
+  for (const m of models) {
+    if (testAbort) break;
+    const placeholder = testRow({ model: m, running: true, key: "…", proxy: "…", latency_ms: null });
+    $("#testTable tbody").appendChild(placeholder);
+    try {
+      const r = await api("POST", `/admin/api/channels/${encodeURIComponent(ch.id)}/test-model`, {
+        models: m,
+        first_only: $("#testScope").value === "first",
+      });
+      const results = r.results || [];
+      if (!results.length) {
+        placeholder.remove();
+        testRowAndCount({ model: m, ok: false, error: "渠道没有启用的 key", latency_ms: null });
+        fail++;
+        continue;
+      }
+      // 替换占位行：失败的 key 逐行展示，最后一行是最终结论
+      placeholder.remove();
+      for (const res of results) {
+        const row = testRow({ ...res, model: res.model || m, latency_ms: res.latency_ms ?? null });
+        $("#testTable tbody").appendChild(row);
+      }
+      const last = results[results.length - 1];
+      if (last.ok) pass++; else fail++;
+    } catch (e) {
+      placeholder.remove();
+      testRowAndCount({ model: m, ok: false, error: e.message, latency_ms: null });
+      fail++;
+    }
+  }
+  testSummaryLine(pass, fail);
+  testRunning = false;
+  testAbort = false;
+  btn.textContent = "▶ 运行测试";
+  btn.classList.remove("danger");
+});
+
+function testRowAndCount(res) {
+  $("#testTable tbody").appendChild(testRow(res));
+}
 
 // ---- 用量 ----
 async function refreshUsage() {

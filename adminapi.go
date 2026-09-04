@@ -26,6 +26,7 @@ func adminAPIHandler() http.Handler {
 	mux.HandleFunc("POST /admin/api/pool/release", handleAdminPoolRelease)
 	mux.HandleFunc("GET /admin/api/pool/leases", handleAdminPoolLeases)
 	mux.HandleFunc("POST /admin/api/testkey", handleAdminTestKey)
+	mux.HandleFunc("POST /admin/api/channels/{id}/test-model", handleAdminTestModel)
 	mux.HandleFunc("POST /admin/api/channels/{id}/fetch-models", handleAdminFetchModels)
 	mux.HandleFunc("GET /admin/api/requests", handleAdminRequests)
 	mux.HandleFunc("GET /admin/api/usage", handleAdminUsage)
@@ -283,19 +284,21 @@ func handleAdminPoolLeases(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"leases": leaseMgr.ListLeases()})
 }
 
+// findChannel 从快照中按 ID 查找渠道。
+func findChannel(id string) *Channel {
+	for _, c := range store.Snapshot().Channels {
+		if c.ID == id {
+			return c
+		}
+	}
+	return nil
+}
+
 // handleAdminFetchModels 用渠道的 key 拉取上游模型列表。
 // 默认（dry_run=1 或未带 replace）只返回候选列表供 WebUI 勾选启用，不写回渠道；
 // replace=1 时全量替换写回渠道（兼容旧脚本）。返回拉取结果供 WebUI 展示。
 func handleAdminFetchModels(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	snap := store.Snapshot()
-	var ch *Channel
-	for _, c := range snap.Channels {
-		if c.ID == id {
-			ch = c
-			break
-		}
-	}
+	ch := findChannel(r.PathValue("id"))
 	if ch == nil {
 		writeJSONError(w, http.StatusNotFound, "channel not found", "not_found")
 		return
@@ -339,6 +342,78 @@ func handleAdminFetchModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// testTarget 指定渠道级测试的范围。
+type testTarget struct {
+	KeyID     string `json:"key_id"`     // 非空=只测该 key
+	FirstOnly bool   `json:"first_only"` // 只用第一个启用的 key（不看后续）
+	Models    string `json:"models"`     // 每行/逗号分隔；空=用渠道已启用模型（无则 "gpt-4o-mini"）
+}
+
+// testResult 一次测试请求的结果（HTTP 层不报错，全部通过 ok=false 表达失败）。
+type testResult struct {
+	OK        bool   `json:"ok"`
+	ChannelID string `json:"channel_id"`
+	Channel   string `json:"channel"`
+	KeyID     string `json:"key_id"`
+	Key       string `json:"key"`
+	Model     string `json:"model"`
+	Status    int    `json:"status,omitempty"`
+	Proxy     string `json:"proxy,omitempty"`
+	LatencyMS int64  `json:"latency_ms"`
+	Snippet   string `json:"snippet,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// runTestOnce 用指定渠道 key 发一条最小测试请求（与客户端直连形态一致：
+// 不带 max_tokens，标准 chat 请求体；responses 渠道由 doUpstreamRequest 自动转换）。
+func runTestOnce(ctx context.Context, ch *Channel, k *UpKey, model, msg string) testResult {
+	res := testResult{ChannelID: ch.ID, Channel: ch.Name, KeyID: k.ID, Key: k.Name, Model: model}
+	reqBody, _ := json.Marshal(map[string]any{
+		"model":    model,
+		"messages": []map[string]string{{"role": "user", "content": msg}},
+		"stream":   false,
+	})
+	cand := candidate{ch: ch, k: k}
+	route, err := resolveProxy(&cand)
+	if err != nil {
+		res.Error = "proxy resolve failed: " + err.Error()
+		return res
+	}
+	res.Proxy = route.describe()
+	client := newUpstreamClient(route)
+	start := time.Now()
+	resp, err := doUpstreamRequest(ctx, client, &cand, reqBody, false, nil)
+	res.LatencyMS = time.Since(start).Milliseconds()
+	if err != nil {
+		res.Error = err.Error()
+		return res
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	leaseMgr.RecordUse(cand.k.Proxy, cand.k.ID)
+	res.Status = resp.StatusCode
+	res.OK = resp.StatusCode >= 200 && resp.StatusCode < 300
+	res.Snippet = truncate(string(data), 512)
+	return res
+}
+
+// parseTestModels 解析测试模型清单：支持逗号/空白/换行分隔，去重去空。
+func parseTestModels(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == ' ' || r == '\t'
+	})
+	out := make([]string, 0, len(fields))
+	seen := map[string]bool{}
+	for _, f := range fields {
+		f = strings.TrimSpace(f)
+		if f != "" && !seen[f] {
+			seen[f] = true
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // handleAdminTestKey 用指定渠道 key 发一条测试请求，验证上游与代理连通性。
 func handleAdminTestKey(w http.ResponseWriter, r *http.Request) {
 	var body struct {
@@ -368,41 +443,67 @@ func handleAdminTestKey(w http.ResponseWriter, r *http.Request) {
 	if msg == "" {
 		msg = "ping"
 	}
-	// 最小标准 chat 请求：与客户端直连一致，不携带 max_tokens 等参数
-	// （新版 OpenAI 模型已移除 max_tokens，携带会直接 400）
-	reqBody, _ := json.Marshal(map[string]any{
-		"model":    model,
-		"messages": []map[string]string{{"role": "user", "content": msg}},
-		"stream":   false,
-	})
-
-	cand := candidate{ch: ch, k: k}
-	route, err := resolveProxy(&cand)
-	var proxyDesc string
-	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "proxy resolve failed: " + err.Error()})
-		return
-	}
-	proxyDesc = route.describe()
-
-	client := newUpstreamClient(route)
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	start := time.Now()
-	resp, err := doUpstreamRequest(ctx, client, &cand, reqBody, false, nil)
-	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "proxy": proxyDesc, "error": err.Error(), "latency_ms": time.Since(start).Milliseconds()})
+	writeJSON(w, http.StatusOK, runTestOnce(ctx, ch, k, model, msg))
+}
+
+// handleAdminTestModel 渠道级测试：对指定模型集合，在渠道内按顺序挑选可用 key
+// 发起真实对话请求（复用网关的故障转移语义），返回逐 (key, 模型) 结果供 WebUI 展示。
+// key_id 非空时只测该 key。所有失败都以 ok=false 的结果返回，不用 HTTP 错误码。
+func handleAdminTestModel(w http.ResponseWriter, r *http.Request) {
+	var body testTarget
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid json: "+err.Error(), "bad_request")
 		return
 	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
-	leaseMgr.RecordUse(cand.k.Proxy, cand.k.ID)
+	ch := findChannel(r.PathValue("id"))
+	if ch == nil {
+		writeJSONError(w, http.StatusNotFound, "channel not found", "not_found")
+		return
+	}
+	models := parseTestModels(body.Models)
+	if len(models) == 0 {
+		models = ch.Models
+		if len(models) == 0 {
+			models = []string{"gpt-4o-mini"}
+		}
+	}
+	// 候选 key：按配置顺序（key_id 非空时仅该 key；first_only 时取第一个启用的）
+	keys := make([]*UpKey, 0, len(ch.Keys))
+	for _, k := range ch.Keys {
+		if !k.Enabled {
+			continue
+		}
+		if body.KeyID == "" || k.ID == body.KeyID {
+			keys = append(keys, k)
+		}
+		if body.FirstOnly {
+			break
+		}
+	}
+	if len(keys) == 0 {
+		writeJSONError(w, http.StatusBadRequest, "channel has no enabled key matching key_id", "bad_request")
+		return
+	}
+
+	results := make([]testResult, 0, len(keys)*len(models))
+	for _, m := range models {
+		for _, k := range keys {
+			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+			res := runTestOnce(ctx, ch, k, m, "ping")
+			cancel()
+			results = append(results, res)
+			if res.OK {
+				break // 该模型已通过，无需继续其余 key
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":         resp.StatusCode >= 200 && resp.StatusCode < 300,
-		"status":     resp.StatusCode,
-		"proxy":      proxyDesc,
-		"latency_ms": time.Since(start).Milliseconds(),
-		"snippet":    truncate(string(data), 512),
+		"channel_id": ch.ID,
+		"channel":    ch.Name,
+		"models":     models,
+		"results":    results,
 	})
 }
 

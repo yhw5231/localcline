@@ -25,6 +25,7 @@
     <div class="brand">UniGate <span class="muted">通用网关</span></div>
     <nav class="tabs">
       <button data-tab="channels" class="tab active">渠道</button>
+      <button data-tab="test" class="tab">渠道测试</button>
       <button data-tab="gwkeys" class="tab">通用密钥</button>
       <button data-tab="logs" class="tab">请求日志</button>
       <button data-tab="usage" class="tab">用量统计</button>
@@ -47,6 +48,43 @@
         <button id="addChannelBtn" class="btn primary">+ 新建渠道</button>
       </div>
       <div id="channelList" class="channel-list"></div>
+    </section>
+
+    <!-- 渠道测试 -->
+    <section id="tab-test" class="tabpane hidden">
+      <div class="row">
+        <h2>渠道测试</h2>
+        <div class="spacer"></div>
+        <button id="testRefreshBtn" class="btn" title="重新加载渠道与模型列表">↻ 刷新</button>
+        <button id="testRunBtn" class="btn primary">▶ 运行测试</button>
+      </div>
+      <div class="test-config panel">
+        <div class="grid2">
+          <label>渠道 <select id="testChannel"></select></label>
+          <label>测试范围
+            <select id="testScope">
+              <option value="all" selected>全部启用的 key</option>
+              <option value="first">仅第一个启用的 key</option>
+            </select>
+          </label>
+        </div>
+        <div class="grid2">
+          <label>模型（每行一个，留空 = 渠道已启用的全部模型） <textarea id="testModels" rows="3" placeholder="留空则测试渠道启用的所有模型；也可粘贴指定模型，每行一个"></textarea></label>
+          <div>
+            <label>已启用模型（点击加入测试清单）</label>
+            <div id="testModelChips" class="chips"></div>
+            <p class="muted" style="font-size:12px;margin:6px 0 0">按渠道内 key 顺序发送真实对话请求（与网关故障转移一致）：某模型在某个 key 上成功即通过，失败则自动尝试下一个 key。</p>
+          </div>
+        </div>
+        <div class="row" style="margin:4px 0 0">
+          <label class="inline"><input type="checkbox" id="testOnlyFirst" checked> 仅测前 3 个模型（模型很多时避免刷爆上游）</label>
+        </div>
+      </div>
+      <div id="testSummary" class="row hidden"></div>
+      <table class="tbl" id="testTable">
+        <thead><tr><th>模型</th><th>状态</th><th>渠道 / key</th><th>HTTP</th><th>耗时</th><th>出口</th><th>返回摘要 / 错误</th></tr></thead>
+        <tbody></tbody>
+      </table>
     </section>
 
     <!-- 通用密钥 -->
