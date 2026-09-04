@@ -555,13 +555,13 @@ async function refreshLogs() {
     const tbody = $("#logTable tbody");
     const recs = data.records || [];
     if (!recs.length) {
-      tbody.innerHTML = `<tr><td colspan="11" class="muted">暂无大模型请求记录（仅记录 /v1/* 网关接口请求，如 chat/completions、models、responses）。</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="11" class="muted">暂无请求记录（记录 /v1/* 网关接口请求，以及后台渠道测试发出的上游请求）。</td></tr>`;
       return;
     }
     tbody.innerHTML = recs.map((r) => `<tr>
       <td class="muted">${esc((r.time || "").replace("T", " ").slice(2, 19))}</td>
       <td class="muted">${esc(r.path || "")}</td>
-      <td><span class="badge ${r.status < 400 ? "on" : "off"}">${r.status}</span></td>
+      <td><span class="badge ${r.status && r.status < 400 ? "on" : "off"}">${r.status || "ERR"}</span></td>
       <td>${r.duration_ms}ms</td>
       <td>${esc(r.channel || "")}</td>
       <td>${esc(r.key || "")}</td>

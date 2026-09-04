@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -32,11 +33,21 @@ func adminAPIHandler() http.Handler {
 	mux.HandleFunc("GET /admin/api/usage", handleAdminUsage)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := requireAdmin(w, r); !ok {
+		user, ok := requireAdmin(w, r)
+		if !ok {
 			return
 		}
-		mux.ServeHTTP(w, r)
+		mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), adminUserKey{}, user)))
 	})
+}
+
+// adminUserKey 上下文键：adminAPIHandler 鉴权通过后注入的登录用户名。
+type adminUserKey struct{}
+
+// adminUserFrom 取当前登录管理员用户名（未注入时为空）。
+func adminUserFrom(ctx context.Context) string {
+	user, _ := ctx.Value(adminUserKey{}).(string)
+	return user
 }
 
 // requireAdmin 校验管理员 token。
@@ -366,7 +377,8 @@ type testResult struct {
 
 // runTestOnce 用指定渠道 key 发一条最小测试请求（与客户端直连形态一致：
 // 不带 max_tokens，标准 chat 请求体；responses 渠道由 doUpstreamRequest 自动转换）。
-func runTestOnce(ctx context.Context, ch *Channel, k *UpKey, model, msg string) testResult {
+// 每次测试（含失败）都会写入请求记录，user 为发起测试的管理员。
+func runTestOnce(ctx context.Context, ch *Channel, k *UpKey, model, msg, user string) testResult {
 	res := testResult{ChannelID: ch.ID, Channel: ch.Name, KeyID: k.ID, Key: k.Name, Model: model}
 	reqBody, _ := json.Marshal(map[string]any{
 		"model":    model,
@@ -374,6 +386,10 @@ func runTestOnce(ctx context.Context, ch *Channel, k *UpKey, model, msg string) 
 		"stream":   false,
 	})
 	cand := candidate{ch: ch, k: k}
+	target := cand.chatTarget()
+	begin := time.Now()
+	var bytesOut int64
+	defer func() { recordTestRequest(begin, target, user, ch.Name, k.Name, model, res, bytesOut) }()
 	route, err := resolveProxy(&cand)
 	if err != nil {
 		res.Error = "proxy resolve failed: " + err.Error()
@@ -390,11 +406,40 @@ func runTestOnce(ctx context.Context, ch *Channel, k *UpKey, model, msg string) 
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	bytesOut = int64(len(data))
 	leaseMgr.RecordUse(cand.k.Proxy, cand.k.ID)
 	res.Status = resp.StatusCode
 	res.OK = resp.StatusCode >= 200 && resp.StatusCode < 300
 	res.Snippet = truncate(string(data), 512)
 	return res
+}
+
+// recordTestRequest 把一次渠道测试请求写入请求记录（与网关请求共用请求日志；
+// 代理解析失败时无上游请求，以 status=0 记录并带错误信息）。不计入用量统计。
+func recordTestRequest(start time.Time, target, user, channel, key, model string, res testResult, bytesOut int64) {
+	if reqLog == nil {
+		return
+	}
+	rec := RequestRecord{
+		ID:         strconv.FormatInt(time.Now().UnixNano(), 36),
+		Time:       start,
+		Duration:   time.Since(start),
+		DurationMs: time.Since(start).Milliseconds(),
+		Method:     http.MethodPost,
+		Path:       target,
+		Status:     res.Status,
+		BytesOut:   bytesOut,
+		User:       user,
+		Channel:    channel,
+		Model:      model,
+		Key:        maskKey(key + "@" + channel),
+	}
+	if res.Error != "" {
+		rec.ErrMsg = res.Error
+	} else if rec.Status >= 400 {
+		rec.ErrMsg = truncate(res.Snippet, 200)
+	}
+	reqLog.Add(rec)
 }
 
 // parseTestModels 解析测试模型清单：支持逗号/空白/换行分隔，去重去空。
@@ -445,7 +490,7 @@ func handleAdminTestKey(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	writeJSON(w, http.StatusOK, runTestOnce(ctx, ch, k, model, msg))
+	writeJSON(w, http.StatusOK, runTestOnce(ctx, ch, k, model, msg, adminUserFrom(r.Context())))
 }
 
 // handleAdminTestModel 渠道级测试：对指定模型集合，在渠道内按顺序挑选可用 key
@@ -491,7 +536,7 @@ func handleAdminTestModel(w http.ResponseWriter, r *http.Request) {
 	for _, m := range models {
 		for _, k := range keys {
 			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-			res := runTestOnce(ctx, ch, k, m, "ping")
+			res := runTestOnce(ctx, ch, k, m, "ping", adminUserFrom(r.Context()))
 			cancel()
 			results = append(results, res)
 			if res.OK {

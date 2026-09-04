@@ -179,6 +179,71 @@ func TestAdminTestKeyEndpoint(t *testing.T) {
 	}
 }
 
+// TestAdminTestKeyWritesRequestLog：测试请求也要进请求记录（reqLog），
+// user 记为发起测试的管理员；路径为上游对话端点，成功状态为 200。
+func TestAdminTestKeyWritesRequestLog(t *testing.T) {
+	setupGateway(t)
+	initStats()
+	tok := adminToken(t)
+	up := newUpstream(t, http.StatusOK, `{"choices":[{"message":{"content":"pong"}}]}`)
+	mustPutChannel(t, &Channel{Name: "c", BaseURL: up.URL, Enabled: true,
+		Keys: []*UpKey{{Name: "k1", APIKey: "sk-1", Enabled: true}}})
+	kid := store.Snapshot().Channels[0].Keys[0].ID
+	chid := store.Snapshot().Channels[0].ID
+
+	rr := httptest.NewRecorder()
+	rootHandler(rr, adminReq(http.MethodPost, "/admin/api/testkey",
+		`{"channel_id":"`+chid+`","key_id":"`+kid+`","model":"m1"}`, tok))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	recs := reqLog.Snapshot()
+	if len(recs) != 1 {
+		t.Fatalf("reqLog has %d records, want 1", len(recs))
+	}
+	rec := recs[0]
+	if !strings.HasSuffix(rec.Path, "/chat/completions") {
+		t.Fatalf("path = %q, want upstream chat endpoint", rec.Path)
+	}
+	if rec.Status != http.StatusOK || rec.User != "admin" || rec.Model != "m1" {
+		t.Fatalf("record = status:%d user:%q model:%q", rec.Status, rec.User, rec.Model)
+	}
+	if rec.Channel != "c" || rec.Key == "" {
+		t.Fatalf("record = channel:%q key:%q", rec.Channel, rec.Key)
+	}
+	if rec.DurationMs < 0 || rec.Time.IsZero() {
+		t.Fatalf("record time/duration invalid: %+v", rec)
+	}
+
+	// 失败的测试请求也要记录（上游 500）
+	up500 := newUpstream(t, http.StatusInternalServerError, `{"error":"boom"}`)
+	mustPutChannel(t, &Channel{Name: "c2", BaseURL: up500.URL, Enabled: true,
+		Keys: []*UpKey{{Name: "k2", APIKey: "sk-2", Enabled: true}}})
+	var ch2 *Channel
+	for _, c := range store.Snapshot().Channels {
+		if c.Name == "c2" {
+			ch2 = c
+		}
+	}
+	if ch2 == nil {
+		t.Fatal("channel c2 not found")
+	}
+	rr = httptest.NewRecorder()
+	rootHandler(rr, adminReq(http.MethodPost, "/admin/api/testkey",
+		`{"channel_id":"`+ch2.ID+`","key_id":"`+ch2.Keys[0].ID+`","model":"m2"}`, tok))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	recs = reqLog.Snapshot()
+	if len(recs) != 2 {
+		t.Fatalf("reqLog has %d records, want 2", len(recs))
+	}
+	if recs[0].Status != http.StatusInternalServerError || recs[0].ErrMsg == "" {
+		t.Fatalf("failed test record = status:%d err:%q", recs[0].Status, recs[0].ErrMsg)
+	}
+}
+
 func TestAdminTestKeyRequestFormat(t *testing.T) {
 	// 测试请求必须是最小标准 OpenAI chat 请求：不带 max_tokens（新版模型已移除该参数），
 	// 带 Accept: application/json 与明确 UA（避免 Go 默认 UA 被上游拒绝）。
@@ -293,7 +358,7 @@ func TestAdminTestModelEndpoint(t *testing.T) {
 		`{"first_only":true}`, tok))
 	var out2 struct {
 		Results []struct {
-			OK  bool `json:"ok"`
+			OK bool `json:"ok"`
 		} `json:"results"`
 	}
 	_ = json.Unmarshal(rr2.Body.Bytes(), &out2)
